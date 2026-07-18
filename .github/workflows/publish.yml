@@ -1,0 +1,50 @@
+name: publish
+
+# Publishes to npm when a GitHub Release is published.
+#
+# Uses npm provenance via GitHub OIDC: the published package carries a signed,
+# verifiable link back to the exact commit and workflow that built it. Requires
+# an NPM_TOKEN with publish rights (npm does not yet support fully tokenless
+# trusted publishing the way PyPI does).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/livetennisapi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run test/client.test.ts
+      - run: npm run build
+
+      - name: Assert the tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::release tag ($TAG) does not match package.json ($PKG)"
+            exit 1
+          fi
+          echo "tag and version agree: $PKG"
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

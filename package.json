@@ -1,0 +1,85 @@
+{
+  "name": "livetennisapi",
+  "version": "1.0.0",
+  "description": "Official JavaScript/TypeScript client for the Live Tennis API — real-time tennis scores, players, market prices and model win-probability over REST and WebSocket.",
+  "keywords": [
+    "tennis",
+    "tennis-api",
+    "live-scores",
+    "livescore",
+    "sports",
+    "sports-api",
+    "sports-data",
+    "atp",
+    "wta",
+    "itf",
+    "odds",
+    "api-client",
+    "sdk",
+    "typescript",
+    "websocket",
+    "real-time"
+  ],
+  "homepage": "https://livetennisapi.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/livetennisapi/livetennisapi-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/livetennisapi/livetennisapi-js/issues"
+  },
+  "license": "MIT",
+  "author": "Live Tennis API",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "livetennis": "./dist/cli.js",
+    "livetennisapi": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:contract": "vitest run test/contract.test.ts",
+    "lint": "eslint src test",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

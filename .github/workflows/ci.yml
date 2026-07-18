@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      # Contract tests need a live key and are excluded here.
+      - run: npx vitest run test/client.test.ts
+
+  build:
+    name: build + verify both module formats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run build
+
+      - name: ESM and CJS both load, CLI runs
+        run: |
+          node -e "import('./dist/index.js').then(m => { if (!m.LiveTennisAPI) process.exit(1); console.log('ESM ok'); })"
+          node -e "const m = require('./dist/index.cjs'); if (!m.LiveTennisAPI) process.exit(1); console.log('CJS ok');"
+          node dist/cli.js --version
+          node dist/cli.js health
+
+      - name: Pack and install from the tarball
+        run: |
+          npm pack
+          mkdir -p /tmp/clean && cd /tmp/clean && npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/livetennisapi-*.tgz
+          node -e "const m = require('livetennisapi'); console.log('installed', m.VERSION);"
+          npx livetennis health
