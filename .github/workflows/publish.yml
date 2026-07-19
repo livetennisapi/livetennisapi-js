@@ -2,10 +2,18 @@ name: publish
 
 # Publishes to npm when a GitHub Release is published.
 #
-# Uses npm provenance via GitHub OIDC: the published package carries a signed,
-# verifiable link back to the exact commit and workflow that built it. Requires
-# an NPM_TOKEN with publish rights (npm does not yet support fully tokenless
-# trusted publishing the way PyPI does).
+# Uses npm Trusted Publishing (OIDC). No NPM_TOKEN exists: npm verifies this
+# workflow's identity directly, so there is no secret in the repo to leak and
+# nothing to rotate. The published package also carries a signed provenance
+# statement linking it to the exact commit and workflow that built it.
+#
+# Configured on npm at Package -> Settings -> Trusted Publisher:
+#   Owner: livetennisapi  Repo: livetennisapi-js
+#   Workflow: publish.yml  Environment: npm  Permission: npm publish
+#
+# The first 1.0.0 release could not use this: npm requires a package to exist
+# before OIDC can be configured, so it was published once with a short-lived
+# token which has since been revoked.
 
 on:
   release:
@@ -45,6 +53,7 @@ jobs:
           fi
           echo "tag and version agree: $PKG"
 
+      # npm >= 11.5.1 is required for OIDC trusted publishing.
+      - run: npm install -g npm@latest
+
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
