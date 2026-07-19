@@ -11,21 +11,55 @@ permissions:
 
 jobs:
   test:
-    name: node ${{ matrix.node }}
+    name: test on node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: ['18', '20', '22']
+        # Vitest is not run on Node 18: its rolldown dependency imports
+        # `styleText` from node:util, which only exists from Node 20. That is a
+        # limitation of the TEST RUNNER, not of this library — Node 18 support
+        # is a real claim and is verified by the `node18-compat` job below,
+        # which builds the package and actually runs it on Node 18.
+        node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm ci
+      - run: npm install
       - run: npm run typecheck
       # Contract tests need a live key and are excluded here.
       - run: npx vitest run test/client.test.ts
+
+  node18-compat:
+    name: runs on node 18 (the floor in package.json engines)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build with a modern Node, then execute the artifact on Node 18. This is
+      # the claim that matters: the PUBLISHED package works on the oldest
+      # supported runtime.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run build
+      - run: npm pack --pack-destination /tmp
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install the tarball and exercise it on Node 18
+        run: |
+          node --version
+          mkdir -p /tmp/n18 && cd /tmp/n18 && npm init -y >/dev/null
+          npm install /tmp/livetennisapi-*.tgz
+          node -e "const m=require('livetennisapi'); if(!m.LiveTennisAPI) process.exit(1); console.log('CJS ok on node 18');"
+          node --input-type=module -e "import('livetennisapi').then(m=>{if(!m.LiveTennisAPI) process.exit(1); console.log('ESM ok on node 18');})"
+          npx livetennis --version
+          npx livetennis health
 
   build:
     name: build + verify both module formats
@@ -35,7 +69,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm ci
+      - run: npm install
       - run: npm run build
 
       - name: ESM and CJS both load, CLI runs
@@ -47,8 +81,8 @@ jobs:
 
       - name: Pack and install from the tarball
         run: |
-          npm pack
+          npm pack --pack-destination /tmp
           mkdir -p /tmp/clean && cd /tmp/clean && npm init -y >/dev/null
-          npm install "$GITHUB_WORKSPACE"/livetennisapi-*.tgz
+          npm install /tmp/livetennisapi-*.tgz
           node -e "const m = require('livetennisapi'); console.log('installed', m.VERSION);"
           npx livetennis health
