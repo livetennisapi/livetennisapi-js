@@ -23,7 +23,7 @@ jobs:
         # which builds the package and actually runs it on Node 18.
         node: ['20', '22']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -36,7 +36,7 @@ jobs:
     name: runs on node 18 (the floor in package.json engines)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build with a modern Node, then execute the artifact on Node 18. This is
       # the claim that matters: the PUBLISHED package works on the oldest
@@ -65,7 +65,7 @@ jobs:
     name: build + verify both module formats
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
