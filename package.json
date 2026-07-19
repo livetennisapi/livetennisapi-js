@@ -1,7 +1,7 @@
 {
   "name": "livetennisapi",
-  "version": "1.0.0",
-  "description": "Official JavaScript/TypeScript client for the Live Tennis API — real-time tennis scores, players, market prices and model win-probability over REST and WebSocket.",
+  "version": "1.0.1",
+  "description": "Official JavaScript/TypeScript client for the Live Tennis API \u2014 real-time tennis scores, players, market prices and model win-probability over REST and WebSocket.",
   "keywords": [
     "tennis",
     "tennis-api",
@@ -61,8 +61,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:contract": "vitest run test/contract.test.ts",
-    "lint": "eslint src test",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:unit": "vitest run test/client.test.ts"
   },
   "peerDependencies": {
     "ws": ">=8"

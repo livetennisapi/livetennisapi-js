@@ -19,7 +19,9 @@ const withKey = KEY ? describe : describe.skip;
 
 const client = new LiveTennisAPI({ apiKey: KEY });
 
-describe('unauthenticated', () => {
+// Network-gated with the rest: this reaches the real API, so it must not run
+// as part of the offline unit suite.
+withKey('unauthenticated', () => {
   it('health needs no key', async () => {
     const health = await new LiveTennisAPI({ apiKey: '' }).health();
     expect(health.status).toBe('ok');

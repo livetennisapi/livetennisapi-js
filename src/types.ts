@@ -34,7 +34,7 @@ export interface Page<T> {
  * indexing it the other way is the most common mistake against this API. Use
  * {@link gamesForSet} rather than indexing by hand.
  *
- * `winProbabilityP1` and `danger` are present only on the ULTRA tier.
+ * `win_probability_p1` and `danger` are present only on the ULTRA tier.
  */
 export interface Score extends Extensible {
   sets?: number[];

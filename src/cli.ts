@@ -51,14 +51,31 @@ interface Args {
   baseUrl?: string;
 }
 
+class UsageError extends Error {}
+
+/** Parse a numeric flag, rejecting a missing or non-numeric value. */
+function numArg(argv: string[], i: number, flag: string): number {
+  const raw = argv[i];
+  const n = Number(raw);
+  if (raw === undefined || raw.startsWith('-') || !Number.isFinite(n)) {
+    throw new UsageError(`${flag} needs a number, got ${raw === undefined ? 'nothing' : `"${raw}"`}`);
+  }
+  return n;
+}
+
+const STATUSES: MatchStatus[] = ['live', 'upcoming', 'completed'];
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { command: '', positional: [], status: 'live', json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === '--json') args.json = true;
-    else if (arg === '--status') args.status = argv[++i] as MatchStatus;
-    else if (arg === '--limit') args.limit = Number(argv[++i]);
-    else if (arg === '--match') args.match = Number(argv[++i]);
+    else if (arg === '--status') {
+      const v = argv[++i] as MatchStatus;
+      if (!STATUSES.includes(v)) throw new UsageError(`--status must be one of ${STATUSES.join(', ')}`);
+      args.status = v;
+    } else if (arg === '--limit') args.limit = numArg(argv, ++i, '--limit');
+    else if (arg === '--match') args.match = numArg(argv, ++i, '--match');
     else if (arg === '--api-key') args.apiKey = argv[++i];
     else if (arg === '--base-url') args.baseUrl = argv[++i];
     else if (!arg.startsWith('-')) {
@@ -99,7 +116,17 @@ async function main(argv: string[]): Promise<number> {
     console.log(`livetennisapi ${VERSION}`);
     return 0;
   }
-  const args = parseArgs(argv);
+  let args: Args;
+  try {
+    args = parseArgs(argv);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      console.log(`${err.message}\n`);
+      console.log(HELP);
+      return 2;
+    }
+    throw err;
+  }
   if (!args.command || args.command === 'help' || argv.includes('--help') || argv.includes('-h')) {
     console.log(HELP);
     return args.command ? 0 : 1;
@@ -145,6 +172,7 @@ async function main(argv: string[]): Promise<number> {
         const id = Number(args.positional[0]);
         if (!Number.isFinite(id)) return console.log('usage: livetennis match <id>'), 1;
         const m = await client.getMatch(id);
+        if (!m) return console.log('no such match'), 1;
         if (args.json) return show(m), 0;
         const [a, b] = names(m);
         const rows: (string | number)[][] = [
@@ -152,6 +180,7 @@ async function main(argv: string[]): Promise<number> {
           ['Tournament', m.tournament ?? '-'],
           ['Round', m.round ?? '-'],
           ['Surface', `${m.surface ?? '-'}${m.indoor ? ' (indoor)' : ''}`],
+          ['Format', m.format ?? '-'],
           ['Status', m.status ?? '-'],
           ['Players', `${a} vs ${b}`],
           ['Score', formatScore(m.score)],
@@ -170,6 +199,7 @@ async function main(argv: string[]): Promise<number> {
         const id = Number(args.positional[0]);
         if (!Number.isFinite(id)) return console.log('usage: livetennis score <id>'), 1;
         const score = await client.getMatchScore(id);
+        if (!score) return console.log('no score yet'), 1;
         if (args.json) return show(score), 0;
         console.log(formatScore(score));
         return 0;

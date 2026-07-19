@@ -117,7 +117,8 @@ cannot start working, and retrying only burns rate limit.
 
 ## Pagination
 
-`limit` defaults to 50 and caps at 200. To walk everything:
+`limit` defaults to 50; the API rejects anything above 200. To walk everything —
+`paginate()` clamps the page size for you:
 
 ```ts
 for await (const player of client.paginate((p) => client.searchPlayers('nadal', p))) {
@@ -162,7 +163,7 @@ formatScore(score);      // '6-4 3-6 2-1 (40-30)'
 ```ts
 new LiveTennisAPI({
   apiKey: 'twjp_…',       // or $LIVETENNISAPI_KEY
-  baseUrl: undefined,
+  baseUrl: undefined,      // or $LIVETENNISAPI_BASE_URL
   timeout: 30_000,
   maxRetries: 2,
   authHeader: 'bearer',   // or 'x-api-key'
@@ -177,7 +178,7 @@ Issues and pull requests welcome at
 
 ```bash
 npm install
-npm test                              # unit tests, no key needed
+npm run test:unit                     # unit tests, offline
 LIVETENNISAPI_KEY=twjp_… npm run test:contract   # verify against the live API
 ```
 

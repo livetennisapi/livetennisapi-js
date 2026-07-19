@@ -3,6 +3,35 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-07-19
+
+### Fixed
+- **WebSocket backoff never grew against a flapping server.** The retry counter
+  reset on a successful *subscribe*, so a server that accepted then immediately
+  dropped the socket pinned the delay at step one forever and
+  `maxReconnectAttempts` was never reached. It now resets only after a
+  connection has stayed up for 60s.
+- **`--limit` / `--match` with no value sent `NaN`.** `Number(undefined)` is
+  `NaN`, which `?? 50` does not catch, so the request went out as `limit=NaN`
+  and the API rejected it. Numeric flags are now validated, as is `--status`.
+- **The CLI crashed with a raw stack trace on a non-JSON response body.** A body
+  that fails to decode yields `undefined`, which was then dereferenced past the
+  error handler. Guarded in the CLI and in the MCP server.
+- Error messages used `??`, so `{"error": null}` surfaced as the literal string
+  `"null"` and an empty HTTP/2 `statusText` produced an empty message. Now uses
+  truthiness, matching the Python client.
+- Retried responses were never drained, holding the connection open under undici
+  until GC.
+
+### Added
+- `LIVETENNISAPI_BASE_URL` is now honoured, matching the Python client.
+- A `User-Agent` is sent outside the browser, so the client is attributable in
+  API logs (browsers forbid setting it).
+- `Format` row in `livetennis match`, matching the Python CLI.
+
+### Removed
+- The `lint` script, which referenced an eslint that was never a dependency.
+
 ## [1.0.0] — 2026-07-19
 
 First release.

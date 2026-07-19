@@ -54,4 +54,4 @@ export type {
   ScoreUpdate,
 } from './types.js';
 
-export const VERSION = '1.0.0';
+export { VERSION } from './version.js';

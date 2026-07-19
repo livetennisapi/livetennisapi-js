@@ -22,7 +22,7 @@
  * and falls back to the `ws` package on older Node.
  */
 
-import { DEFAULT_BASE_URL } from './client.js';
+import { DEFAULT_BASE_URL, readEnv } from './client.js';
 import {
   APIConnectionError,
   LiveTennisAPIError,
@@ -34,6 +34,14 @@ import type { ScoreUpdate } from './types.js';
 
 /** The server drops the socket if the subscribe frame is late. */
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
+
+/**
+ * How long a connection must stay up before it counts as healthy enough to
+ * reset the backoff. Resetting on a successful subscribe alone lets a flapping
+ * server (accept -> ack -> drop) pin the delay at step one forever, so the
+ * backoff never grows and `maxReconnectAttempts` is never reached.
+ */
+const HEALTHY_UPTIME_MS = 60_000;
 
 /** Server error codes that reconnecting can never resolve. */
 const FATAL: Record<string, (message: string) => LiveTennisAPIError> = {
@@ -81,15 +89,6 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
-function envKey(): string {
-  try {
-    return (globalThis as { process?: { env?: Record<string, string> } }).process?.env
-      ?.LIVETENNISAPI_KEY ?? '';
-  } catch {
-    return '';
-  }
-}
-
 export class LiveScoreStream {
   readonly apiKey: string;
   readonly baseUrl: string;
@@ -102,8 +101,8 @@ export class LiveScoreStream {
   private closed = false;
 
   constructor(options: StreamOptions = {}) {
-    this.apiKey = (options.apiKey ?? envKey()).trim();
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
+    this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
     this.topics = options.topics?.length ? options.topics : ['live-scores'];
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
@@ -174,6 +173,7 @@ export class LiveScoreStream {
 
       const socket: AnySocket = new WebSocketImpl(this.url);
       this.socket = socket;
+      let connectedAt: number | null = null;
 
       const on = (type: string, handler: (event: any) => void) => {
         if (typeof socket.addEventListener === 'function') socket.addEventListener(type, handler);
@@ -241,7 +241,7 @@ export class LiveScoreStream {
           });
         }
 
-        attempt = 0; // a successful subscribe resets the backoff
+        connectedAt = Date.now();
 
         for (;;) {
           while (queue.length) {
@@ -276,6 +276,11 @@ export class LiveScoreStream {
       }
 
       if (this.closed || !this.autoReconnect) return;
+
+      // Only a connection that STAYED up resets the backoff. See
+      // HEALTHY_UPTIME_MS: a server that accepts then immediately drops would
+      // otherwise hold the delay at step one indefinitely.
+      if (connectedAt !== null && Date.now() - connectedAt >= HEALTHY_UPTIME_MS) attempt = 0;
 
       attempt += 1;
       if (this.maxReconnectAttempts && attempt > this.maxReconnectAttempts) {

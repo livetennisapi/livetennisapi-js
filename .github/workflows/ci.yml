@@ -29,6 +29,16 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm install
       - run: npm run typecheck
+
+      - name: VERSION matches package.json
+        # src/version.ts is the value users see as `VERSION`; package.json is
+        # what npm publishes. They must not drift.
+        run: |
+          SRC=$(node -p "require('fs').readFileSync('src/version.ts','utf8').match(/'([^']+)'/)[1]")
+          PKG=$(node -p "require('./package.json').version")
+          echo "version.ts=$SRC package.json=$PKG"
+          [ "$SRC" = "$PKG" ]
+
       # Contract tests need a live key and are excluded here.
       - run: npx vitest run test/client.test.ts
 
