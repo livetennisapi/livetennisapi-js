@@ -13,7 +13,7 @@
  * ```
  */
 
-export type Tier = 'BASIC' | 'PRO' | 'ULTRA';
+export type Tier = 'FREE' | 'BASIC' | 'PRO' | 'ULTRA';
 
 export interface APIErrorOptions {
   status: number;

@@ -95,6 +95,13 @@ describe('error mapping', () => {
     await expect(client.listMarkets(1)).rejects.toMatchObject({ requiredTier: 'PRO' });
   });
 
+  it('names BASIC on a history 403 (the FREE-tier wall)', async () => {
+    // FREE stops short of /history/matches, so a free key hitting it must be
+    // told BASIC — not left with the API's bare `upgrade_required`.
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listCompletedMatches()).rejects.toMatchObject({ requiredTier: 'BASIC' });
+  });
+
   it('exposes retryAfter on 429', async () => {
     const { client } = clientReturning(json(429, { error: 'rate_limited' }, { 'retry-after': '12' }), {
       maxRetries: 0,

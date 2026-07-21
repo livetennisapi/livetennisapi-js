@@ -37,11 +37,16 @@ import { VERSION } from './version.js';
 export const DEFAULT_BASE_URL = 'https://api.livetennisapi.com/api/public/v1';
 const MAX_LIMIT = 200;
 
-/** Endpoints needing more than BASIC, so a 403 can name the tier. */
+/**
+ * Endpoints needing more than the FREE floor, so a 403 can name the tier.
+ * Order matters: the first marker that matches the path wins, so the more
+ * specific `/history` sits above nothing it could shadow.
+ */
 const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/analysis', 'ULTRA'],
   ['/events', 'PRO'],
   ['/markets', 'PRO'],
+  ['/history', 'BASIC'],
 ];
 
 function requiredTierFor(path: string): Tier | undefined {
