@@ -13,7 +13,7 @@ win-probability — for ATP, WTA, Challenger and ITF, over REST and WebSocket.
 [![types](https://img.shields.io/npm/types/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[**Documentation**](https://docs.livetennisapi.com) · [**Get an API key**](https://livetennisapi.com/#pricing)
+[**Documentation**](https://docs.livetennisapi.com) · [**Get a free API key**](https://livetennisapi.com/subscribe/free)
 
 </div>
 
@@ -79,12 +79,13 @@ retrying forever.
 
 ## Tiers
 
-| | BASIC | PRO | ULTRA |
-|---|:--:|:--:|:--:|
-| `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ |
-| `searchPlayers` `getPlayer` `listFixtures` `listCompletedMatches` | ✅ | ✅ | ✅ |
-| `listMatchEvents` `listMarkets` `getMarketPrices` | — | ✅ | ✅ |
-| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | ✅ |
+| | FREE | BASIC | PRO | ULTRA |
+|---|:--:|:--:|:--:|:--:|
+| `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ | ✅ |
+| `searchPlayers` `getPlayer` `listFixtures` | ✅ | ✅ | ✅ | ✅ |
+| `listCompletedMatches` (history) | — | ✅ | ✅ | ✅ |
+| `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
+| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | — | ✅ |
 
 Calling above your tier throws `UpgradeRequired`, which tells you which tier you need:
 
