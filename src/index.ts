@@ -47,6 +47,7 @@ export type {
   Match,
   MatchEvent,
   MatchStatus,
+  Tour,
   Page,
   Player,
   Price,

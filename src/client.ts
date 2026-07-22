@@ -27,6 +27,7 @@ import type {
   Match,
   MatchEvent,
   MatchStatus,
+  Tour,
   Page,
   Player,
   Score,
@@ -244,9 +245,16 @@ export class LiveTennisAPI {
     return this.request('/health');
   }
 
-  /** Matches by lifecycle status. */
-  listMatches(params: { status?: MatchStatus } & ListParams = {}): Promise<Page<Match>> {
-    return this.request('/matches', { status: params.status ?? 'live', ...params });
+  /**
+   * Matches by lifecycle status, optionally restricted to one tour.
+   *
+   * The default is applied AFTER the spread. With the spread last, an explicit
+   * `status: undefined` — which is what `{ status: someMaybeUndefined }` produces
+   * — overwrote the default back to undefined and the request went out with no
+   * status at all.
+   */
+  listMatches(params: { status?: MatchStatus; tour?: Tour } & ListParams = {}): Promise<Page<Match>> {
+    return this.request('/matches', { ...params, status: params.status ?? 'live' });
   }
 
   /** Full match detail. Embeds `market` at PRO and `analysis` at ULTRA. */
@@ -295,7 +303,7 @@ export class LiveTennisAPI {
   }
 
   /** Upcoming scheduled fixtures, earliest first. */
-  listFixtures(params: ListParams = {}): Promise<Page<Fixture>> {
+  listFixtures(params: { tour?: Tour } & ListParams = {}): Promise<Page<Fixture>> {
     return this.request('/fixtures', params);
   }
 
