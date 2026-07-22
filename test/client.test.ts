@@ -193,6 +193,21 @@ describe('requests', () => {
     await client.listMatches();
     expect(calls[0]!.url).toContain('status=live');
   });
+
+  it('still defaults to live when status is explicitly undefined', async () => {
+    // `{ status: maybeUndefined }` is what any caller forwarding an optional
+    // produces. The default used to sit before the spread, so this overwrote it
+    // and the request went out with no status at all.
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ status: undefined, limit: 5 });
+    expect(calls[0]!.url).toContain('status=live');
+  });
+
+  it('passes the tour filter through', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ tour: 'wta' });
+    expect(calls[0]!.url).toContain('tour=wta');
+  });
 });
 
 describe('pagination', () => {
