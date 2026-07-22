@@ -1,7 +1,7 @@
 {
   "name": "livetennisapi",
   "version": "1.0.2",
-  "description": "Official JavaScript/TypeScript client for the Live Tennis API \u2014 real-time tennis scores, players, market prices and model win-probability over REST and WebSocket.",
+  "description": "Official JavaScript/TypeScript client for the Live Tennis API \u2014 real-time tennis scores, players and fixtures over REST and WebSocket, for ATP, WTA, Challenger and ITF. Market prices and model win-probability are available on the PRO and ULTRA plans.",
   "keywords": [
     "tennis",
     "tennis-api",
