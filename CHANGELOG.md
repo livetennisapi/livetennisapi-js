@@ -3,6 +3,31 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-07-22
+
+### Added
+- **`tour` filter on `listMatches()` and `listFixtures()`**, with a `Tour` union
+  (`atp` | `wta` | `challenger` | `itf` | `juniors`). The API has accepted this
+  since the public surface shipped, but it reached neither the OpenAPI document
+  nor any client, so it could only be used by casting around the types. Each
+  value covers its singles and doubles draws; an unknown value is a `400`.
+
+### Fixed
+- **`listMatches()` sent no status when given an explicit `undefined`.** The
+  `'live'` default was applied before the spread, so `{ status: maybeUndefined }`
+  — the natural shape when forwarding an optional — overwrote it. Now applied
+  after, with a regression test.
+- **CommonJS consumers could not resolve types.** The `exports` map pointed
+  `types` at the ESM declarations under both conditions while shipping an
+  unreferenced `dist/index.d.cts`, so `moduleResolution: Node16` failed with
+  TS1479. Each condition now resolves its own declarations.
+
+### Changed
+- Package description states that market prices and model win-probability are
+  PRO/ULTRA features. The free tier serves scores, players and fixtures, so the
+  previous wording described the product line rather than what a new install
+  gets.
+
 ## [1.0.2] — 2026-07-21
 
 ### Fixed
