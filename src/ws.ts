@@ -14,6 +14,12 @@
  * `ping` heartbeat roughly every 15s. Heartbeats are consumed internally and
  * never yielded.
  *
+ * Pass `signals: ['break_point']` to also receive the headline break-point feed:
+ * `break_point` frames (yielded as {@link BreakPoint}) the instant a break point
+ * arises and `break_point_result` frames ({@link BreakPointResult}) when it
+ * resolves. Narrow on `frame.type` to tell frames apart. With no `signals` the
+ * stream yields only `score` frames, exactly as before.
+ *
  * Reconnects automatically with exponential backoff and re-subscribes. It does
  * **not** reconnect on a bad key, an insufficient tier, or the service being
  * disabled — retrying those would just hammer a closed door.
@@ -30,7 +36,7 @@ import {
   Unauthorized,
   UpgradeRequired,
 } from './errors.js';
-import type { ScoreUpdate } from './types.js';
+import type { BreakPoint, BreakPointResult, ScoreUpdate, StreamFrame } from './types.js';
 
 /** The server drops the socket if the subscribe frame is late. */
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
@@ -55,6 +61,11 @@ export interface StreamOptions {
   baseUrl?: string;
   /** `live-scores` for every live match, or `match:<id>`. */
   topics?: string[];
+  /**
+   * Opt-in signals to receive on top of score frames, e.g. `['break_point']`.
+   * Omitted (the default) means score frames only — identical to before. ULTRA.
+   */
+  signals?: string[];
   autoReconnect?: boolean;
   /** 0 means retry forever. */
   maxReconnectAttempts?: number;
@@ -93,6 +104,7 @@ export class LiveScoreStream {
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly topics: string[];
+  readonly signals: string[];
   readonly autoReconnect: boolean;
   readonly maxReconnectAttempts: number;
   readonly timeout: number;
@@ -104,6 +116,7 @@ export class LiveScoreStream {
     this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
     this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
     this.topics = options.topics?.length ? options.topics : ['live-scores'];
+    this.signals = (options.signals ?? []).filter(Boolean);
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
     this.timeout = options.timeout ?? 30_000;
@@ -160,8 +173,15 @@ export class LiveScoreStream {
     throw new LiveTennisAPIError(`live feed error: ${code}${hint}`);
   }
 
-  /** Yield score updates until the stream is closed. */
-  async *listen(): AsyncGenerator<ScoreUpdate, void, unknown> {
+  /**
+   * Yield stream frames until the stream is closed.
+   *
+   * Score frames come as {@link ScoreUpdate}. When `signals` requested
+   * `break_point`, break-point frames come as {@link BreakPoint} and
+   * {@link BreakPointResult}. With no signals only {@link ScoreUpdate} is ever
+   * yielded, exactly as before. Narrow on `frame.type`.
+   */
+  async *listen(): AsyncGenerator<StreamFrame, void, unknown> {
     const WebSocketImpl = await resolveWebSocket();
     let attempt = 0;
 
@@ -216,7 +236,11 @@ export class LiveScoreStream {
           });
         });
 
-        socket.send(JSON.stringify({ action: 'subscribe', topics: this.topics }));
+        // The server keys off `topics` (+ optional `signals`); `action` is
+        // ignored but kept for forward compatibility.
+        const subscribe: Record<string, unknown> = { action: 'subscribe', topics: this.topics };
+        if (this.signals.length) subscribe.signals = this.signals;
+        socket.send(JSON.stringify(subscribe));
 
         // Wait for the `subscribed` ack before yielding anything.
         const deadline = Date.now() + SUBSCRIBE_TIMEOUT_MS;
@@ -247,6 +271,8 @@ export class LiveScoreStream {
           while (queue.length) {
             const frame = queue.shift()!;
             if (frame.type === 'score') yield frame as ScoreUpdate;
+            else if (frame.type === 'break_point') yield frame as BreakPoint;
+            else if (frame.type === 'break_point_result') yield frame as BreakPointResult;
             else if (frame.type === 'error') LiveScoreStream.raiseFrameError(frame);
             // 'ping' and 'subscribed' are protocol noise.
           }
@@ -292,7 +318,7 @@ export class LiveScoreStream {
     }
   }
 
-  [Symbol.asyncIterator](): AsyncGenerator<ScoreUpdate, void, unknown> {
+  [Symbol.asyncIterator](): AsyncGenerator<StreamFrame, void, unknown> {
     return this.listen();
   }
 }
