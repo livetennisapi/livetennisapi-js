@@ -3,6 +3,29 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-07-24
+
+### Added
+- **Break-point signals over the WebSocket feed.** `LiveScoreStream` accepts a
+  new `signals` option; pass `signals: ['break_point']` and the stream also
+  yields a `BreakPoint` the instant a break point arises and a
+  `BreakPointResult` when it resolves, alongside the usual `ScoreUpdate`.
+  Previously the subscribe frame carried no `signals` key and `listen()`
+  swallowed every non-`score` frame, so the headline break-point feed was
+  unreachable from this client. Narrow on `frame.type` to tell frames apart.
+- `BreakPoint`, `BreakPointResult` and the `StreamFrame` union are exported.
+
+### Fixed
+- **`src/version.ts` had drifted to `1.0.2` while `package.json` was `1.1.0`.**
+  The CI check that asserts they match would have failed on the next release;
+  both are now `1.2.0`.
+
+### Notes
+- **Fully backwards compatible.** With no `signals` (the default) the subscribe
+  frame and everything the stream yields are identical to 1.1.0 — score frames
+  only.
+- The break-point feed is **ULTRA-only**, like the rest of the WebSocket surface.
+
 ## [1.1.0] — 2026-07-22
 
 ### Added

@@ -156,6 +156,51 @@ export interface ScoreUpdate extends Score {
   match_id?: number;
 }
 
+/**
+ * A `break_point` frame — a break point is on the board.
+ *
+ * Delivered only when the stream subscribed with `signals: ['break_point']`
+ * (ULTRA). `server` is the player serving, `returner` the one holding the break
+ * point(s); `break_points` is how many are live at once (1-3). `prob_swing` is
+ * the same quantity the REST score exposes as `danger`. Every field is ULTRA-only.
+ */
+export interface BreakPoint extends Extensible {
+  type?: 'break_point';
+  match_id?: number;
+  server?: 1 | 2 | null;
+  returner?: 1 | 2 | null;
+  break_points?: number;
+  set?: number;
+  game?: number;
+  point?: string;
+  win_probability_p1?: number | null;
+  prob_swing?: number | null;
+  server_side_favoured?: boolean | null;
+  ts?: string | null;
+}
+
+/**
+ * A `break_point_result` frame — a break point just resolved.
+ *
+ * `outcome` is `held` (server saved it) or `broken` (returner converted).
+ * `win_probability_p1_after` is p1's win probability once the game closed.
+ * Opt-in signal; ULTRA-only.
+ */
+export interface BreakPointResult extends Extensible {
+  type?: 'break_point_result';
+  match_id?: number;
+  server?: 1 | 2 | null;
+  outcome?: 'held' | 'broken';
+  win_probability_p1_after?: number | null;
+  ts?: string | null;
+}
+
+/**
+ * Any frame the live stream may yield. `score` frames arrive always; the break
+ * frames only when their signal was requested. Narrow on the `type` field.
+ */
+export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult;
+
 export type MatchStatus = 'live' | 'upcoming' | 'completed';
 
 /**

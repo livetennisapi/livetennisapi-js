@@ -77,6 +77,33 @@ retrying forever.
 
 > On Node 22+ the global `WebSocket` is used. On Node 18–20, `npm install ws`.
 
+### Break-point signals
+
+Opt in with `signals: ['break_point']` to also receive the headline break-point
+feed. The stream then yields a `BreakPoint` the moment a break point arises and a
+`BreakPointResult` when it resolves, alongside the usual `ScoreUpdate` — narrow on
+`frame.type`:
+
+```ts
+import { LiveScoreStream } from 'livetennisapi';
+
+const stream = new LiveScoreStream({ apiKey: 'twjp_…', signals: ['break_point'] });
+
+for await (const frame of stream) {
+  if (frame.type === 'break_point') {
+    console.log(`BREAK POINT on ${frame.match_id}: p${frame.returner} has ${frame.break_points}`);
+  } else if (frame.type === 'break_point_result') {
+    console.log(`  -> ${frame.outcome} (p1 win prob now ${frame.win_probability_p1_after})`);
+  } else if (frame.type === 'score') {
+    console.log(frame.match_id, frame.sets);
+  }
+}
+```
+
+With no `signals` the stream behaves exactly as before — score frames only. Both
+the feed and its fields are ULTRA-only. A runnable example lives in
+[`livetennisapi-starter-node`](https://github.com/livetennisapi/livetennisapi-starter-node).
+
 ## Tiers
 
 | | FREE | BASIC | PRO | ULTRA |

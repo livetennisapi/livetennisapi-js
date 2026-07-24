@@ -40,6 +40,8 @@ export type { Tier } from './errors.js';
 export { gamesForSet, formatScore } from './types.js';
 export type {
   Analysis,
+  BreakPoint,
+  BreakPointResult,
   Extensible,
   Fixture,
   ListMeta,
@@ -53,6 +55,7 @@ export type {
   Price,
   Score,
   ScoreUpdate,
+  StreamFrame,
 } from './types.js';
 
 export { VERSION } from './version.js';
