@@ -95,6 +95,13 @@ describe('error mapping', () => {
     await expect(client.listMarkets(1)).rejects.toMatchObject({ requiredTier: 'PRO' });
   });
 
+  it('names BASIC on a history 403 (the FREE-tier wall)', async () => {
+    // FREE stops short of /history/matches, so a free key hitting it must be
+    // told BASIC — not left with the API's bare `upgrade_required`.
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listCompletedMatches()).rejects.toMatchObject({ requiredTier: 'BASIC' });
+  });
+
   it('exposes retryAfter on 429', async () => {
     const { client } = clientReturning(json(429, { error: 'rate_limited' }, { 'retry-after': '12' }), {
       maxRetries: 0,
@@ -185,6 +192,21 @@ describe('requests', () => {
     const { client, calls } = clientReturning(json(200, { data: [] }));
     await client.listMatches();
     expect(calls[0]!.url).toContain('status=live');
+  });
+
+  it('still defaults to live when status is explicitly undefined', async () => {
+    // `{ status: maybeUndefined }` is what any caller forwarding an optional
+    // produces. The default used to sit before the spread, so this overwrote it
+    // and the request went out with no status at all.
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ status: undefined, limit: 5 });
+    expect(calls[0]!.url).toContain('status=live');
+  });
+
+  it('passes the tour filter through', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ tour: 'wta' });
+    expect(calls[0]!.url).toContain('tour=wta');
   });
 });
 
