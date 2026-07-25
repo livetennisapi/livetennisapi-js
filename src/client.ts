@@ -27,19 +27,27 @@ import type {
   Match,
   MatchEvent,
   MatchStatus,
+  Tour,
   Page,
   Player,
   Score,
 } from './types.js';
 
+import { VERSION } from './version.js';
+
 export const DEFAULT_BASE_URL = 'https://api.livetennisapi.com/api/public/v1';
 const MAX_LIMIT = 200;
 
-/** Endpoints needing more than BASIC, so a 403 can name the tier. */
+/**
+ * Endpoints needing more than the FREE floor, so a 403 can name the tier.
+ * Order matters: the first marker that matches the path wins, so the more
+ * specific `/history` sits above nothing it could shadow.
+ */
 const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/analysis', 'ULTRA'],
   ['/events', 'PRO'],
   ['/markets', 'PRO'],
+  ['/history', 'BASIC'],
 ];
 
 function requiredTierFor(path: string): Tier | undefined {
@@ -80,14 +88,18 @@ export type ListParams = {
   offset?: number;
 };
 
-function envKey(): string {
+/** Read an env var, guarded: `process` does not exist in a browser or edge runtime. */
+export function readEnv(name: string): string {
   try {
-    // Guarded: `process` does not exist in a browser or edge runtime.
-    return (globalThis as { process?: { env?: Record<string, string> } }).process?.env
-      ?.LIVETENNISAPI_KEY ?? '';
+    return (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.[name] ?? '';
   } catch {
     return '';
   }
+}
+
+/** True in a browser, where the platform forbids setting User-Agent. */
+function isBrowser(): boolean {
+  return typeof (globalThis as { window?: unknown }).window !== 'undefined';
 }
 
 export class LiveTennisAPI {
@@ -99,8 +111,8 @@ export class LiveTennisAPI {
   private readonly fetchImpl: typeof globalThis.fetch;
 
   constructor(options: ClientOptions = {}) {
-    this.apiKey = (options.apiKey ?? envKey()).trim();
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
+    this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.maxRetries = Math.max(0, options.maxRetries ?? 2);
     this.authHeader = options.authHeader ?? 'bearer';
@@ -118,6 +130,9 @@ export class LiveTennisAPI {
 
   private headers(): Record<string, string> {
     const headers: Record<string, string> = { Accept: 'application/json' };
+    // Browsers forbid setting User-Agent; everywhere else it makes this client
+    // attributable in API logs, matching the Python client.
+    if (!isBrowser()) headers['User-Agent'] = `livetennisapi-js/${VERSION}`;
     if (this.apiKey) {
       if (this.authHeader === 'bearer') headers.Authorization = `Bearer ${this.apiKey}`;
       else headers['X-API-Key'] = this.apiKey;
@@ -175,6 +190,12 @@ export class LiveTennisAPI {
       }
 
       if (this.shouldRetry(response.status) && attempt < this.maxRetries) {
+        // Drain the discarded body, or undici holds the connection until GC.
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* already consumed or unsupported */
+        }
         await sleep(this.backoff(attempt, retryAfterSeconds(response.headers)));
         continue;
       }
@@ -199,11 +220,12 @@ export class LiveTennisAPI {
       headers[key] = value;
     });
 
-    const code =
-      body && typeof body === 'object' && 'error' in body
-        ? String((body as { error?: unknown }).error)
-        : undefined;
-    const message = code ?? response.statusText ?? 'request failed';
+    // Truthiness, not `??`: an `{"error": null}` body or an empty statusText
+    // (HTTP/2 has none) must fall through to the generic message rather than
+    // surface as the string "null" or "". Matches the Python client.
+    const raw = body && typeof body === 'object' ? (body as { error?: unknown }).error : undefined;
+    const code = typeof raw === 'string' && raw ? raw : undefined;
+    const message = code || response.statusText || 'request failed';
     const options = { status: response.status, body, headers, url };
 
     if (response.status === 403) {
@@ -223,9 +245,16 @@ export class LiveTennisAPI {
     return this.request('/health');
   }
 
-  /** Matches by lifecycle status. */
-  listMatches(params: { status?: MatchStatus } & ListParams = {}): Promise<Page<Match>> {
-    return this.request('/matches', { status: params.status ?? 'live', ...params });
+  /**
+   * Matches by lifecycle status, optionally restricted to one tour.
+   *
+   * The default is applied AFTER the spread. With the spread last, an explicit
+   * `status: undefined` — which is what `{ status: someMaybeUndefined }` produces
+   * — overwrote the default back to undefined and the request went out with no
+   * status at all.
+   */
+  listMatches(params: { status?: MatchStatus; tour?: Tour } & ListParams = {}): Promise<Page<Match>> {
+    return this.request('/matches', { ...params, status: params.status ?? 'live' });
   }
 
   /** Full match detail. Embeds `market` at PRO and `analysis` at ULTRA. */
@@ -274,7 +303,7 @@ export class LiveTennisAPI {
   }
 
   /** Upcoming scheduled fixtures, earliest first. */
-  listFixtures(params: ListParams = {}): Promise<Page<Fixture>> {
+  listFixtures(params: { tour?: Tour } & ListParams = {}): Promise<Page<Fixture>> {
     return this.request('/fixtures', params);
   }
 

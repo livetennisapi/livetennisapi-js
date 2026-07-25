@@ -13,7 +13,7 @@ win-probability — for ATP, WTA, Challenger and ITF, over REST and WebSocket.
 [![types](https://img.shields.io/npm/types/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[**Documentation**](https://docs.livetennisapi.com) · [**Get an API key**](https://livetennisapi.com/#pricing)
+[**Documentation**](https://docs.livetennisapi.com) · [**Get a free API key**](https://livetennisapi.com/subscribe/free)
 
 </div>
 
@@ -79,12 +79,13 @@ retrying forever.
 
 ## Tiers
 
-| | BASIC | PRO | ULTRA |
-|---|:--:|:--:|:--:|
-| `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ |
-| `searchPlayers` `getPlayer` `listFixtures` `listCompletedMatches` | ✅ | ✅ | ✅ |
-| `listMatchEvents` `listMarkets` `getMarketPrices` | — | ✅ | ✅ |
-| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | ✅ |
+| | FREE | BASIC | PRO | ULTRA |
+|---|:--:|:--:|:--:|:--:|
+| `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ | ✅ |
+| `searchPlayers` `getPlayer` `listFixtures` | ✅ | ✅ | ✅ | ✅ |
+| `listCompletedMatches` (history) | — | ✅ | ✅ | ✅ |
+| `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
+| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | — | ✅ |
 
 Calling above your tier throws `UpgradeRequired`, which tells you which tier you need:
 
@@ -117,7 +118,8 @@ cannot start working, and retrying only burns rate limit.
 
 ## Pagination
 
-`limit` defaults to 50 and caps at 200. To walk everything:
+`limit` defaults to 50; the API rejects anything above 200. To walk everything —
+`paginate()` clamps the page size for you:
 
 ```ts
 for await (const player of client.paginate((p) => client.searchPlayers('nadal', p))) {
@@ -162,7 +164,7 @@ formatScore(score);      // '6-4 3-6 2-1 (40-30)'
 ```ts
 new LiveTennisAPI({
   apiKey: 'twjp_…',       // or $LIVETENNISAPI_KEY
-  baseUrl: undefined,
+  baseUrl: undefined,      // or $LIVETENNISAPI_BASE_URL
   timeout: 30_000,
   maxRetries: 2,
   authHeader: 'bearer',   // or 'x-api-key'
@@ -177,13 +179,27 @@ Issues and pull requests welcome at
 
 ```bash
 npm install
-npm test                              # unit tests, no key needed
+npm run test:unit                     # unit tests, offline
 LIVETENNISAPI_KEY=twjp_… npm run test:contract   # verify against the live API
 ```
 
 The contract tests assert the live API's real responses match these types. If the
 API and the [spec](https://github.com/livetennisapi/openapi) disagree, that's a bug
 worth reporting.
+
+## Related
+
+Everything in the Live Tennis API developer surface:
+
+| | Install | Source | Package |
+|---|---|---|---|
+| Python client | `pip install livetennisapi` | [repo](https://github.com/livetennisapi/livetennisapi-python) | [package](https://pypi.org/project/livetennisapi/) |
+| JavaScript / TypeScript client **(this repo)** | `npm install livetennisapi` | — | [package](https://www.npmjs.com/package/livetennisapi) |
+| MCP server for LLM agents | `npx livetennisapi-mcp` | [repo](https://github.com/livetennisapi/livetennisapi-mcp) | [package](https://www.npmjs.com/package/livetennisapi-mcp) |
+
+- **API reference** — <https://docs.livetennisapi.com> ([plain-HTML version](https://docs.livetennisapi.com/reference.html), no JavaScript required)
+- **OpenAPI 3.1 specification** — [livetennisapi/openapi](https://github.com/livetennisapi/openapi)
+- **Website and plans** — <https://livetennisapi.com>
 
 ## Licence
 

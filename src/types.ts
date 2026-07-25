@@ -34,7 +34,7 @@ export interface Page<T> {
  * indexing it the other way is the most common mistake against this API. Use
  * {@link gamesForSet} rather than indexing by hand.
  *
- * `winProbabilityP1` and `danger` are present only on the ULTRA tier.
+ * `win_probability_p1` and `danger` are present only on the ULTRA tier.
  */
 export interface Score extends Extensible {
   sets?: number[];
@@ -157,6 +157,15 @@ export interface ScoreUpdate extends Score {
 }
 
 export type MatchStatus = 'live' | 'upcoming' | 'completed';
+
+/**
+ * Tour filter accepted by `/matches` and `/fixtures`.
+ *
+ * Each value covers its singles and doubles draws — `atp` includes ATP doubles,
+ * `juniors` covers the boys' and girls' Grand Slam draws. An unrecognised value
+ * is a 400, never a silent pass-through.
+ */
+export type Tour = 'atp' | 'wta' | 'challenger' | 'itf' | 'juniors';
 
 /**
  * Games for one set as `[p1, p2]`, guarding the player-major layout.
