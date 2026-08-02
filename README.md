@@ -28,6 +28,10 @@ npm install livetennisapi
 **Zero runtime dependencies.** Uses the platform `fetch` and `WebSocket`, so it runs
 unchanged on Node 18+, Deno, Bun, Cloudflare Workers and the browser.
 
+**CORS is enabled** on the API (`Access-Control-Allow-Origin: *`), so browser calls
+work directly. Caveat: a FREE key in browser code is acceptable; a **paid key never
+is** — anyone can read it from the page. Keep paid keys server-side.
+
 ## Use
 
 ```ts
