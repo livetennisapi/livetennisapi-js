@@ -102,6 +102,30 @@ describe('error mapping', () => {
     await expect(client.listCompletedMatches()).rejects.toMatchObject({ requiredTier: 'BASIC' });
   });
 
+  it('names BASIC on a results-archive 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listArchiveMatches()).rejects.toMatchObject({ requiredTier: 'BASIC' });
+  });
+
+  it('names BASIC on an h2h 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getH2H('federer', 'nadal')).rejects.toMatchObject({ requiredTier: 'BASIC' });
+  });
+
+  it('surfaces ambiguous_name candidates on the error body', async () => {
+    // /h2h and /history/archive/career refuse a fragment matching more than
+    // one player — summing two people into one record would be a wrong answer.
+    // The candidate list must stay reachable so a caller can disambiguate.
+    const { client } = clientReturning(
+      json(400, { error: 'ambiguous_name', candidates: ['Serena Williams', 'Venus Williams'] }),
+      { maxRetries: 0 },
+    );
+    const err = await client.getH2H('williams', 'sharapova').catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequest);
+    expect(err.errorCode).toBe('ambiguous_name');
+    expect((err.body as { candidates: string[] }).candidates).toContain('Venus Williams');
+  });
+
   it('exposes retryAfter on 429', async () => {
     const { client } = clientReturning(json(429, { error: 'rate_limited' }, { 'retry-after': '12' }), {
       maxRetries: 0,
@@ -207,6 +231,67 @@ describe('requests', () => {
     const { client, calls } = clientReturning(json(200, { data: [] }));
     await client.listMatches({ tour: 'wta' });
     expect(calls[0]!.url).toContain('tour=wta');
+  });
+
+  it('repeats the player parameter instead of comma-joining it', async () => {
+    // The API reads `?player=1&player=2`; `player=1,2` is a 400.
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ player: [925, 1137] });
+    expect(calls[0]!.url).toContain('player=925&player=1137');
+    expect(calls[0]!.url).not.toContain('player=925%2C1137');
+  });
+
+  it('accepts a single player id without an array', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ player: 925 });
+    expect(calls[0]!.url).toContain('player=925');
+  });
+
+  it('passes the date and country filters through', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ from: '2026-07-01', to: '2026-07-31', country: 'ned' });
+    expect(calls[0]!.url).toContain('from=2026-07-01');
+    expect(calls[0]!.url).toContain('to=2026-07-31');
+    expect(calls[0]!.url).toContain('country=ned');
+  });
+
+  it('passes history filters through, coverage included', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listCompletedMatches({ tour: 'itf', player: 925, coverage: 'from_start' });
+    expect(calls[0]!.url).toContain('/history/matches');
+    expect(calls[0]!.url).toContain('tour=itf');
+    expect(calls[0]!.url).toContain('player=925');
+    expect(calls[0]!.url).toContain('coverage=from_start');
+  });
+
+  it('builds the tournament paths', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listTournaments({ search: 'wimbledon', tour: 'atp' });
+    expect(calls[0]!.url).toContain(`${BASE}/tournaments?`);
+    expect(calls[0]!.url).toContain('search=wimbledon');
+    await client.getTournament('atp-wimbledon');
+    expect(calls[1]!.url).toContain(`${BASE}/tournaments/atp-wimbledon`);
+  });
+
+  it('builds the results-archive paths and filters', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listArchiveMatches({ tour: 'atp', name: 'borg', round: 'F', level: 'G', from: '1976-01-01' });
+    expect(calls[0]!.url).toContain(`${BASE}/history/archive/matches?`);
+    expect(calls[0]!.url).toContain('name=borg');
+    expect(calls[0]!.url).toContain('round=F');
+    expect(calls[0]!.url).toContain('level=G');
+    await client.getArchiveMatch(123456);
+    expect(calls[1]!.url).toContain(`${BASE}/history/archive/matches/123456`);
+    await client.listArchivePlayers({ name: 'navratilova', tour: 'wta' });
+    expect(calls[2]!.url).toContain(`${BASE}/history/archive/players?`);
+    await client.getArchiveCareer('borg');
+    expect(calls[3]!.url).toContain(`${BASE}/history/archive/career?name=borg`);
+  });
+
+  it('sends both h2h names', async () => {
+    const { client, calls } = clientReturning(json(200, {}));
+    await client.getH2H('federer', 'nadal');
+    expect(calls[0]!.url).toContain(`${BASE}/h2h?p1=federer&p2=nadal`);
   });
 });
 

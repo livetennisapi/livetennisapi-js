@@ -22,12 +22,20 @@ import {
 } from './errors.js';
 import type {
   Analysis,
+  ArchiveCareer,
+  ArchiveMatch,
+  ArchivePlayerBio,
+  ArchiveTour,
+  Coverage,
   Fixture,
+  HeadToHead,
   Market,
   Match,
   MatchEvent,
   MatchStatus,
+  RoundCode,
   Tour,
+  Tournament,
   Page,
   Player,
   Score,
@@ -48,6 +56,7 @@ const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/events', 'PRO'],
   ['/markets', 'PRO'],
   ['/history', 'BASIC'],
+  ['/h2h', 'BASIC'],
 ];
 
 function requiredTierFor(path: string): Tier | undefined {
@@ -143,7 +152,16 @@ export class LiveTennisAPI {
   private url(path: string, params?: Record<string, unknown>): string {
     const url = new URL(this.baseUrl + (path.startsWith('/') ? path : `/${path}`));
     for (const [key, value] of Object.entries(params ?? {})) {
-      if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+      if (value === undefined || value === null) continue;
+      // Repeatable parameters (`player`) go out as `?player=1&player=2` — the
+      // API reads repeats, not comma-joined lists.
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (item !== undefined && item !== null) url.searchParams.append(key, String(item));
+        }
+      } else {
+        url.searchParams.set(key, String(value));
+      }
     }
     return url.toString();
   }
@@ -246,14 +264,33 @@ export class LiveTennisAPI {
   }
 
   /**
-   * Matches by lifecycle status, optionally restricted to one tour.
+   * Matches by lifecycle status, filterable by tour, participant, nationality
+   * and play date.
    *
-   * The default is applied AFTER the spread. With the spread last, an explicit
-   * `status: undefined` — which is what `{ status: someMaybeUndefined }` produces
-   * — overwrote the default back to undefined and the request went out with no
-   * status at all.
+   * - `player` — matches where this player is EITHER participant. Repeatable
+   *   (pass an array), max 50 ids; multiple values are the deduplicated union.
+   * - `from` / `to` — play-date bounds, `YYYY-MM-DD` or ISO-8601 UTC. A bare
+   *   date covers the whole UTC day.
+   * - `country` — either participant's `player.country` equals this lowercase
+   *   3-letter code. The vocabulary is what the Player object returns —
+   *   IOC-style codes (`ned`, `sui`, `gre`), NOT ISO-3166. Players with no
+   *   recorded country never match.
+   *
+   * The status default is applied AFTER the spread. With the spread last, an
+   * explicit `status: undefined` — which is what `{ status: someMaybeUndefined }`
+   * produces — overwrote the default back to undefined and the request went out
+   * with no status at all.
    */
-  listMatches(params: { status?: MatchStatus; tour?: Tour } & ListParams = {}): Promise<Page<Match>> {
+  listMatches(
+    params: {
+      status?: MatchStatus;
+      tour?: Tour;
+      player?: number | number[];
+      country?: string;
+      from?: string;
+      to?: string;
+    } & ListParams = {},
+  ): Promise<Page<Match>> {
     return this.request('/matches', { ...params, status: params.status ?? 'live' });
   }
 
@@ -297,14 +334,125 @@ export class LiveTennisAPI {
     return this.request(`/markets/${matchId}/prices`, params);
   }
 
-  /** Completed matches, newest first, with a derived `winner`. */
-  listCompletedMatches(params: ListParams = {}): Promise<Page<Match>> {
+  /**
+   * Completed matches, newest first, with a derived `winner`. **BASIC** (or
+   * any History plan).
+   *
+   * Takes the same `tour` / `player` / `country` / `from` / `to` filters as
+   * `listMatches()`, plus `coverage` — keep only matches whose tape has that
+   * coverage. Note the coverage filter is applied AFTER the page is cut, so a
+   * filtered page is routinely shorter than `limit` (and may be empty) while
+   * later pages still hold matching matches — a short filtered page is not an
+   * end-of-data signal there.
+   */
+  listCompletedMatches(
+    params: {
+      tour?: Tour;
+      player?: number | number[];
+      country?: string;
+      from?: string;
+      to?: string;
+      coverage?: Coverage;
+    } & ListParams = {},
+  ): Promise<Page<Match>> {
     return this.request('/history/matches', params);
   }
 
   /** Upcoming scheduled fixtures, earliest first. */
   listFixtures(params: { tour?: Tour } & ListParams = {}): Promise<Page<Fixture>> {
     return this.request('/fixtures', params);
+  }
+
+  /**
+   * Tournament catalogue, name order — the stable id space
+   * `Match.tournament_id` joins. `search` is a case-insensitive substring
+   * match on the tournament name.
+   */
+  listTournaments(params: { search?: string; tour?: Tour } & ListParams = {}): Promise<Page<Tournament>> {
+    return this.request('/tournaments', params);
+  }
+
+  /** One tournament by its stable id — the `tournament_id` carried on match objects. */
+  getTournament(tournamentId: string): Promise<Tournament> {
+    return this.request(`/tournaments/${encodeURIComponent(tournamentId)}`);
+  }
+
+  /**
+   * The results archive (1968–2022): completed-match RESULTS from a licensed
+   * historical corpus — ATP and WTA, main draws, qualifying and the
+   * ITF/futures tiers — newest tournament first. **BASIC** (or any History
+   * plan).
+   *
+   * Distinct from the point-by-point tape (2023→now) served by
+   * `listCompletedMatches()`: the archive ends exactly where the tape begins,
+   * so no match is ever served from two datasets. `name` is a
+   * case-insensitive substring match on EITHER player's name (min 3 chars);
+   * `from` / `to` bound the tournament START date (the only date this era's
+   * records carry); `level` is the source tier code (G, M, A, F, D, C, O, or
+   * a futures category code such as "15").
+   */
+  listArchiveMatches(
+    params: {
+      tour?: ArchiveTour;
+      name?: string;
+      from?: string;
+      to?: string;
+      round?: RoundCode;
+      level?: string;
+    } & ListParams = {},
+  ): Promise<Page<ArchiveMatch>> {
+    return this.request('/history/archive/matches', params);
+  }
+
+  /**
+   * One results-archive record, with per-match serve statistics where the era
+   * recorded them — `stats` is null for most rows before 1991, and that null
+   * is honest, never synthesised. **BASIC** (or any History plan).
+   */
+  getArchiveMatch(archiveId: number): Promise<ArchiveMatch> {
+    return this.request(`/history/archive/matches/${archiveId}`);
+  }
+
+  /**
+   * The people of the results archive (1968–2022), ordered by name — hand,
+   * date of birth, country, height, and career-high rank with the earliest
+   * week it was reached. **BASIC** (or any History plan).
+   *
+   * Their `id` is the corpus person id that archive match rows carry as
+   * `winner.player_id` / `loser.player_id`, scoped per tour — never a roster
+   * id.
+   */
+  listArchivePlayers(params: { name?: string; tour?: ArchiveTour } & ListParams = {}): Promise<Page<ArchivePlayerBio>> {
+    return this.request('/history/archive/players', params);
+  }
+
+  /**
+   * Career aggregates over the results archive (1968–2022) for one player —
+   * W-L by surface/level/year, titles, and the summed serve-stat block with
+   * honest coverage. **BASIC** (or any History plan).
+   *
+   * `name` must resolve to exactly one person: an ambiguous fragment is
+   * refused with a 400 `ambiguous_name` whose body carries the candidate
+   * list (`err.body.candidates`), an unknown one is a 404.
+   */
+  getArchiveCareer(name: string): Promise<ArchiveCareer> {
+    return this.request('/history/archive/career', { name });
+  }
+
+  /**
+   * Head-to-head across both halves of the product: the results archive
+   * (1968–2022) plus our own completed matches (2023→now). **BASIC** (or any
+   * History plan).
+   *
+   * Names are the keys (min 3 chars each) — archive people have no roster
+   * ids. A fragment matching more than one player is refused with a 400
+   * `ambiguous_name` and the candidate list in `err.body.candidates`, because
+   * two people summed into one record is a wrong answer, not a convenience.
+   * `meetings[].winner` is 1|2 OF THIS REQUEST (your `p1`/`p2`), not of the
+   * underlying match row.
+   */
+  getH2H(p1: string, p2: string): Promise<HeadToHead> {
+    return this.request('/h2h', { p1, p2 });
   }
 
   // -- pagination -------------------------------------------------------------
