@@ -114,9 +114,13 @@ the feed and its fields are ULTRA-only. A runnable example lives in
 |---|:--:|:--:|:--:|:--:|
 | `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ | ✅ |
 | `searchPlayers` `getPlayer` `listFixtures` | ✅ | ✅ | ✅ | ✅ |
-| `listCompletedMatches` (history) | — | ✅ | ✅ | ✅ |
+| `listTournaments` `getTournament` | ✅ | ✅ | ✅ | ✅ |
+| `listCompletedMatches` (history) | — | ✅¹ | ✅ | ✅ |
+| `listArchiveMatches` `getArchiveMatch` `listArchivePlayers` `getArchiveCareer` `getH2H` (results archive · head-to-head) | — | ✅¹ | ✅ | ✅ |
 | `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
 | `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | — | ✅ |
+
+¹ Also unlocked by any History plan, which works on top of a FREE key.
 
 Calling above your tier throws `UpgradeRequired`, which tells you which tier you need:
 
@@ -146,6 +150,37 @@ All extend `LiveTennisAPIError`.
 Requests retry on **429 and 5xx only**, honouring `Retry-After` with exponential
 backoff and jitter. Other 4xx are never retried — a bad key or an unentitled tier
 cannot start working, and retrying only burns rate limit.
+
+## The results archive (1968–2022) and head-to-head
+
+Two halves, one product: the **results archive** — a licensed corpus of
+completed-match results, ATP and WTA, main draws, qualifying and the
+ITF/futures tiers, 1968 through 2022 — and the **point-by-point tape
+(2023→now)** behind `listCompletedMatches`. The archive ends exactly where the
+tape begins, so no match is ever served from two datasets.
+
+```ts
+// Winner/loser-shaped results with ranks and seeds AT THE TIME of the match.
+const { data } = await client.listArchiveMatches({ tour: 'atp', name: 'borg', round: 'F' });
+
+// Cross-era head-to-head — archive + our own completed matches, in one call.
+const h2h = await client.getH2H('federer', 'nadal');
+console.log(h2h.totals, h2h.by_surface);
+
+// Career aggregates: W-L by surface/level/year, titles, summed serve stats.
+const career = await client.getArchiveCareer('borg');
+```
+
+Three things worth knowing before you lean on it:
+
+- **`event_date` is the tournament START date** — per-match dates do not exist
+  in this era's records, and none are invented.
+- **Names are the keys** for `getH2H` and `getArchiveCareer` (archive people
+  have no roster ids). A fragment matching more than one player is refused
+  with a `400 ambiguous_name` carrying the candidate list in
+  `err.body.candidates` — disambiguate and retry.
+- **`meetings[].winner` in an H2H is 1|2 of your request** (`p1`/`p2` as you
+  passed them), not of the underlying match row.
 
 ## Pagination
 

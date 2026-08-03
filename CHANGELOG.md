@@ -3,6 +3,50 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-08-03
+
+### Added
+- **The results archive (1968–2022).** Five new methods over the licensed
+  historical results corpus — ATP and WTA, main draws, qualifying and the
+  ITF/futures tiers, ending 2022-12-31 exactly where the point-by-point tape
+  (2023→now) begins:
+  - `listArchiveMatches()` / `getArchiveMatch()` — winner/loser-shaped results
+    with final score, seeds, ranks at the time, and (on the detail read)
+    per-match serve statistics where the era recorded them. `event_date` is
+    the tournament START date.
+  - `listArchivePlayers()` — archive bios: hand, DOB, country, height,
+    career-high rank and the earliest week it was reached.
+  - `getArchiveCareer(name)` — career aggregates: W-L by surface/level/year,
+    titles, summed serve stats with honest coverage
+    (`serve.matches_with_stats`).
+  - `getH2H(p1, p2)` — cross-era head-to-head over the archive PLUS our own
+    completed matches, name-keyed; `meetings[].winner` is 1|2 of the request.
+    Ambiguous name fragments are refused with a `400 ambiguous_name` carrying
+    the candidate list in `err.body.candidates` (also true of
+    `getArchiveCareer`); all four BASIC-gated reads name `BASIC` on a 403.
+- **Tournament catalogue.** `listTournaments()` / `getTournament(id)` (FREE) —
+  the stable id space `Match.tournament_id` joins, with `surface`, `indoor`,
+  curated `city`/`country`, and `category` (set only where the catalogues
+  agree unambiguously, never derived from the name).
+- **New list filters.** `listMatches()` takes `player` (repeatable, max 50),
+  `from` / `to` (play-date bounds) and `country` (IOC-style lowercase
+  3-letter codes, as `player.country` returns them — not ISO-3166);
+  `listCompletedMatches()` takes those plus `tour` and `coverage`. Repeatable
+  parameters go out as `?player=1&player=2` — the API does not read
+  comma-joined lists.
+- **New match fields, typed.** `Match` gains `tour` (the same vocabulary the
+  filter accepts), `tournament_id`, `round_code` (normalized round — the
+  field to branch on), and `withdrew`; `event_status` is now documented on the
+  type. `Fixture` gains `start_time`, `player1_id` / `player2_id` and
+  `round_code`. `ListMeta` gains `total` and `has_more`.
+- New exported types: `Tournament`, `TournamentCategory`, `ArchiveMatch`,
+  `ArchiveParticipant`, `ArchivePlayerBio`, `ArchiveTour`, `ArchiveCareer`,
+  `HeadToHead`, `HeadToHeadMeeting`, `RoundCode`, `Coverage`.
+
+### Notes
+- **Fully backwards compatible.** Every addition is a new method, a new
+  optional parameter, or a new optional field on an `Extensible` type.
+
 ## [1.2.0] — 2026-07-24
 
 ### Added
