@@ -3,6 +3,32 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-08-07
+
+### Fixed
+- **`ScoreUpdate` typed a frame that never existed.** The wire NESTS the
+  payload — `{"type": "score", "match_id": N, "score": {sets, games, points,
+  server, is_tiebreak, timestamp, win_probability_p1, danger}}` — but the
+  type extended `Score` and described the fields flat on the frame. The
+  stream has always passed the raw frame through, so every flat read
+  (`frame.sets`, `frame.win_probability_p1`) compiled and returned
+  `undefined`. `ScoreUpdate` is now `{type, match_id, score?: Score}` with
+  the model fields inside `score`, matching what actually arrives. A
+  regression test replays the real nested wire shape verbatim.
+- **The CLI's `watch` printed `-` for every score** for the same reason: it
+  read the score fields off the frame instead of `frame.score`. Fixed.
+- **`BreakPoint.set` and `.game` are strings on the wire** (`'1-1'`,
+  `'3-4'`), not numbers as typed since 1.2.0. Retyped to match.
+- **The subscribe frame carried a stray `action: 'subscribe'` key.** The
+  server ignores unknown keys, so it was harmless — but the documented frame
+  is `{topics, signals?}` and that is now exactly what is sent.
+
+### Notes
+- No behavioural change for consumers who were already reading
+  `frame.score` (which always worked at runtime); consumers who read the
+  flat fields were reading `undefined` and will now get a compile error
+  pointing at the fix.
+
 ## [1.4.0] — 2026-08-07
 
 ### Added

@@ -198,10 +198,19 @@ export interface Match extends Extensible {
   analysis?: Analysis | null;
 }
 
-/** A `score` frame from the WebSocket feed. */
-export interface ScoreUpdate extends Score {
+/**
+ * A `score` frame from the WebSocket feed.
+ *
+ * The wire NESTS the payload: `{"type": "score", "match_id": N, "score":
+ * {...}}` — `score` is the same allowlist {@link Score} object the polling
+ * endpoints return, model fields (`win_probability_p1`, `danger`) included
+ * (the whole feed is ULTRA). Read `frame.score.sets`, never `frame.sets`:
+ * the score fields do not exist at the top level of the frame.
+ */
+export interface ScoreUpdate extends Extensible {
   type?: 'score';
   match_id?: number;
+  score?: Score;
 }
 
 /**
@@ -218,8 +227,11 @@ export interface BreakPoint extends Extensible {
   server?: 1 | 2 | null;
   returner?: 1 | 2 | null;
   break_points?: number;
-  set?: number;
-  game?: number;
+  /** The set score when the break point arose, as a string — e.g. `'1-1'`. */
+  set?: string;
+  /** Games in the current set, as a string — e.g. `'3-4'`. */
+  game?: string;
+  /** The point score, e.g. `'30-40'` or `'40-AD'`. */
   point?: string;
   win_probability_p1?: number | null;
   prob_swing?: number | null;

@@ -70,9 +70,13 @@ import { LiveScoreStream } from 'livetennisapi';
 const stream = new LiveScoreStream({ apiKey: 'twjp_…' });
 
 for await (const update of stream) {
-  console.log(update.match_id, update.sets);
+  if (update.type === 'score') console.log(update.match_id, update.score?.sets);
 }
 ```
+
+Score frames nest their payload under `.score` — the same object the REST
+score reads return: `{ type: 'score', match_id, score: { sets, games, points,
+server, is_tiebreak, timestamp, win_probability_p1, danger } }`.
 
 Reconnects with exponential backoff and re-subscribes automatically. Heartbeats are
 consumed internally, so you only see real score changes. It deliberately does **not**
@@ -99,7 +103,7 @@ for await (const frame of stream) {
   } else if (frame.type === 'break_point_result') {
     console.log(`  -> ${frame.outcome} (p1 win prob now ${frame.win_probability_p1_after})`);
   } else if (frame.type === 'score') {
-    console.log(frame.match_id, frame.sets);
+    console.log(frame.match_id, frame.score?.sets);
   }
 }
 ```
@@ -108,9 +112,10 @@ With no `signals` the stream behaves exactly as before — score frames only. Bo
 the feed and its fields are ULTRA-only. A runnable example lives in
 [`livetennisapi-starter-node`](https://github.com/livetennisapi/livetennisapi-starter-node).
 
-Score frames carry the model fields — `win_probability_p1` and `danger` — just
-like the REST score reads (the whole feed is ULTRA). A `null` there means the
-model had no output for that state, not a missing feature.
+Score frames carry the model fields — `win_probability_p1` and `danger` —
+inside `.score`, just like the REST score reads (the whole feed is ULTRA). A
+`null` there means the model had no output for that state, not a missing
+feature.
 
 ### Push feed (Centrifugo)
 

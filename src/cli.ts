@@ -271,7 +271,11 @@ async function main(argv: string[]): Promise<number> {
         });
         for await (const update of stream) {
           if (args.json) console.log(JSON.stringify(update));
-          else console.log(`[${update.match_id}] ${formatScore(update)}`);
+          // The wire nests the payload: {type:'score', match_id, score:{…}}.
+          // Reading score fields off the frame itself printed '-' forever.
+          else if (update.type === 'score') {
+            console.log(`[${update.match_id}] ${formatScore(update.score)}`);
+          }
         }
         return 0;
       }
