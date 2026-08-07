@@ -470,6 +470,497 @@ export interface ArchiveCareer extends Extensible {
 }
 
 /**
+ * Ranking system vocabulary of `/rankings`. Systems are never collapsed into a
+ * single "rank" — they are not comparable. ATP/WTA and the ITF circuits carry
+ * rank+points; `utr` carries a rating with null rank and points, because UTR
+ * is a rating, not a ranking (and has no listing mode).
+ */
+export type RankingSystem = 'atp' | 'wta' | 'itf_jt' | 'itf_mt' | 'itf_wt' | 'utr';
+
+/**
+ * One ranking record in force at the requested instant — the newest record
+ * effective ON OR BEFORE `as_of`, never one dated after it. Every other
+ * ranking field in this API is the player's CURRENT value joined at read
+ * time; this endpoint is the point-in-time answer.
+ */
+export interface RankingRecord extends Extensible {
+  /** Null on listing rows for players outside our roster — the table has no silent holes. */
+  player_id?: number | null;
+  /** The name as the ranking publisher printed it. Listing rows only; absent on per-player records. */
+  player_name?: string | null;
+  system?: RankingSystem;
+  tour?: string | null;
+  /** Null for UTR. */
+  rank?: number | null;
+  /** Null for UTR. */
+  points?: number | null;
+  /**
+   * The rank at the immediately preceding snapshot week — ATP/WTA only; null
+   * when no prior week is held, and always null for ITF/UTR.
+   */
+  previous_rank?: number | null;
+  /** The circuit's own signed weekly movement — ITF systems only; null elsewhere. */
+  rank_movement?: number | null;
+  /** UTR only; null elsewhere. */
+  rating?: number | null;
+  /** The publication week this record took effect. */
+  effective_date?: string | null;
+  observed_at?: string | null;
+}
+
+/**
+ * `meta` of a `/rankings` response. Read `coverage` before trusting an empty
+ * result: ITF and UTR history begins 2026-07-29 and cannot be reconstructed
+ * earlier, so a request before that date correctly returns nothing for those
+ * systems.
+ */
+export interface RankingListMeta extends ListMeta {
+  coverage?: {
+    as_of?: string | null;
+    players_requested?: number;
+    players_resolved?: number;
+    systems_requested?: string[];
+    systems_resolved?: string[];
+    /** Earliest effective date held, per requested system. */
+    oldest_available?: Record<string, string | null>;
+  };
+}
+
+/** A `/rankings` page — `Page<RankingRecord>` with the richer coverage meta. */
+export interface RankingsPage {
+  data: RankingRecord[];
+  meta?: RankingListMeta;
+}
+
+/**
+ * Where tape rows came from — reported once in `Tape.meta`, never per row, so
+ * the row shape cannot carry data-source provenance. `observed` = every row
+ * watched live; `reconstructed` = every row expanded after the fact;
+ * `mixed` = a reconstructed opening followed by what we watched. Null on an
+ * empty tape.
+ */
+export type PointSource = 'observed' | 'reconstructed' | 'mixed';
+
+/**
+ * One row of a match tape — the score after a committed state change.
+ *
+ * Rows we watched live carry a real `timestamp`. Rows expanded after the fact
+ * from a finished-match point-by-point record carry a null `timestamp` AND
+ * null model fields, because neither a wall clock nor a model output ever
+ * existed for them — nothing is synthesised. A null `timestamp` is the
+ * reliable row-level marker of a reconstructed row; the model fields alone
+ * are not, since they are stamped best-effort and an observed row may lack
+ * them.
+ */
+export interface TapeRow extends Extensible {
+  sets?: number[];
+  /** Player-major, like {@link Score.games}. */
+  games?: number[][];
+  points?: string[];
+  server?: 1 | 2 | null;
+  is_tiebreak?: boolean;
+  win_probability_p1?: number | null;
+  danger?: number | null;
+  timestamp?: string | null;
+  /**
+   * Who won the point this row records — present ONLY on `sequence: 'clean'`
+   * rows, and only where the transition from the previous row is a single
+   * attributable point; null on gaps, torn rows and the first row. Never on
+   * the raw sequence (raw is deliberately non-monotonic: consecutive raw rows
+   * are corrections, not points). Derived at read time, never guessed.
+   */
+  point_winner?: 1 | 2 | null;
+}
+
+/** A tiebreak final score, `{p1, p2}`. */
+export interface TiebreakScore extends Extensible {
+  p1?: number;
+  p2?: number;
+}
+
+/**
+ * The per-match tape: match header + chronological score sequence + model
+ * profiles + coverage meta. **BASIC** (or any History plan). Works on a LIVE
+ * match too — the tape is assembled from whatever has been committed so far.
+ *
+ * The tape is NOT guaranteed to cover the whole match: check `meta.coverage`
+ * and `meta.point_source` before backtesting.
+ */
+export interface Tape extends Extensible {
+  match?: Match;
+  tape?: TapeRow[];
+  /**
+   * Per-set tiebreak final scores from OBSERVED states only, aligned to the
+   * sets of the final scoreline: an entry for a 7-6 set whose observed
+   * maximum tiebreak state is a valid terminal shape (max ≥ 7, margin ≥ 2),
+   * null per set otherwise — a breaker whose closing point the feed skipped
+   * reads null rather than an under-report. Null when the match has no 7-6
+   * set.
+   */
+  tiebreaks?: (TiebreakScore | null)[] | null;
+  /** Model profiles, oldest first (the `Analysis` `profile` shape). */
+  profiles?: unknown[];
+  meta?: {
+    match_id?: number;
+    /** Rows RETURNED — after any `sequence: 'clean'` collapse. */
+    rows?: number;
+    coverage?: Coverage;
+    point_source?: PointSource | null;
+    /** Rows BEFORE any collapse — equals `rows` when `sequence` is `raw`. */
+    raw_rows?: number;
+    /** Distinct score states in the raw tape. `raw_rows` minus this is pure repetition. */
+    unique_states?: number;
+    sequence?: 'raw' | 'clean';
+    /** Served from the immutable archive rather than the live table. Informational. */
+    from_archive?: boolean;
+    generated_at?: string;
+  } & Extensible;
+}
+
+/**
+ * Coverage state of a statistics family: `final` is the closing figures of a
+ * completed match; `none` returns 200 with null `players`, not a 404 — the
+ * match exists and holding nothing for it is the honest answer; on
+ * `diverged` the measured VALUES are withheld.
+ */
+export type StatisticsCoverage = 'live' | 'final' | 'stale' | 'none' | 'diverged';
+
+/**
+ * Measured counting statistics for one player. These are COUNTED upstream,
+ * not derived from the point record — which is why they can include aces and
+ * double faults, and the derived fields cannot.
+ *
+ * EVERY field is optional and an absent field is OMITTED, never zero-filled —
+ * read the keys you are given. Aces and double faults are present across
+ * every tour; the serve split and break points saved are present on the main
+ * tours and absent on ITF singles; winners and unforced errors appear on a
+ * minority of main-tour matches. A `_of` suffix is the denominator of its
+ * base field and a `_pct` suffix is the percentage recomputed from the two
+ * counts.
+ */
+export interface MatchStatisticsMeasured extends Extensible {
+  aces?: number | null;
+  double_faults?: number | null;
+  points_won?: number | null;
+  service_points_won?: number | null;
+  return_points_won?: number | null;
+  break_points_won?: number | null;
+  service_games_won?: number | null;
+  games_won?: number | null;
+  max_points_in_row?: number | null;
+  max_games_in_row?: number | null;
+  first_serves_in?: number | null;
+  first_serves_in_of?: number | null;
+  first_serves_in_pct?: number | null;
+  second_serves_in?: number | null;
+  second_serves_in_of?: number | null;
+  second_serves_in_pct?: number | null;
+  first_serve_points_won?: number | null;
+  first_serve_points_won_of?: number | null;
+  first_serve_points_won_pct?: number | null;
+  second_serve_points_won?: number | null;
+  second_serve_points_won_of?: number | null;
+  second_serve_points_won_pct?: number | null;
+  first_return_points_won?: number | null;
+  first_return_points_won_of?: number | null;
+  first_return_points_won_pct?: number | null;
+  second_return_points_won?: number | null;
+  second_return_points_won_of?: number | null;
+  second_return_points_won_pct?: number | null;
+  break_points_saved?: number | null;
+  break_points_saved_of?: number | null;
+  break_points_saved_pct?: number | null;
+  service_games_played?: number | null;
+  tiebreaks_won?: number | null;
+  winners_total?: number | null;
+  forehand_winners?: number | null;
+  backhand_winners?: number | null;
+  groundstroke_winners?: number | null;
+  volley_winners?: number | null;
+  overhead_winners?: number | null;
+  drop_shot_winners?: number | null;
+  lob_winners?: number | null;
+  return_winners?: number | null;
+  errors_total?: number | null;
+  unforced_errors_total?: number | null;
+  forehand_errors?: number | null;
+  forehand_unforced_errors?: number | null;
+  backhand_errors?: number | null;
+  backhand_unforced_errors?: number | null;
+  groundstroke_errors?: number | null;
+  groundstroke_unforced_errors?: number | null;
+  volley_unforced_errors?: number | null;
+  overhead_errors?: number | null;
+  drop_shot_unforced_errors?: number | null;
+  lob_unforced_errors?: number | null;
+  return_errors?: number | null;
+}
+
+/**
+ * One player's in-play statistics, in TWO families that are deliberately not
+ * merged. The fields at this level are DERIVED from the point-by-point
+ * record; `measured` holds counts taken upstream. Both families name some of
+ * the same quantities, computed two entirely different ways — that is a
+ * cross-check, not a duplication to collapse.
+ */
+export interface MatchStatisticsSide extends Extensible {
+  measured?: MatchStatisticsMeasured;
+  service_games_played?: number;
+  service_games_won?: number;
+  /** Null when no service game was played — never 0, so a present 0 is a real zero. */
+  hold_pct?: number | null;
+  return_games_played?: number;
+  return_games_won?: number;
+  break_pct?: number | null;
+  break_points_faced?: number;
+  break_points_saved?: number;
+  break_points_saved_pct?: number | null;
+  break_points_played?: number;
+  break_points_converted?: number;
+  break_points_converted_pct?: number | null;
+  service_points_played?: number;
+  service_points_won?: number;
+  service_points_won_pct?: number | null;
+  return_points_played?: number;
+  return_points_won?: number;
+  return_points_won_pct?: number | null;
+  points_played?: number;
+  points_won?: number;
+}
+
+/** Per-family coverage and age for `/matches/{id}/statistics`. */
+export interface MatchStatisticsFamily extends Extensible {
+  coverage?: StatisticsCoverage;
+  as_of?: string | null;
+  /**
+   * The derived age is measured against the newest SCORE row; the measured
+   * age is wall clock. THE TWO CLOCKS MUST NOT BE COMPARED.
+   */
+  age_seconds?: number | null;
+  /** The match state these statistics describe, per upstream. Null when unavailable. */
+  describes?: {
+    games_p1?: number[];
+    games_p2?: number[];
+    total_games?: number;
+  } | null;
+}
+
+/**
+ * In-play statistics for one match. **ULTRA.**
+ *
+ * Branch on `freshness.derived` / `freshness.measured` rather than the
+ * top-level `coverage`, which only summarises the response. On `diverged`
+ * the measured values are withheld and `freshness.measured_divergence` says
+ * why. Tiebreak games are excluded from the DERIVED family and counted in
+ * `tiebreak_games_excluded` — the live record collapses a whole tiebreak
+ * onto one entry.
+ */
+export interface MatchStatistics extends Extensible {
+  match_id?: number;
+  coverage?: StatisticsCoverage;
+  as_of?: string | null;
+  /** Behind the newest SCORE row, not the wall clock. */
+  age_seconds?: number | null;
+  games_counted?: number;
+  tiebreak_games_excluded?: number;
+  /** Games whose recorded outcome is neither a legal hold nor a legal break. */
+  inconsistent_games_excluded?: number;
+  sets_covered?: number[];
+  freshness?: {
+    /** Null when the families agree; otherwise why the measured values were withheld. */
+    measured_divergence?: {
+      reason?: string;
+      games_in_statistics?: number;
+      games_in_score?: number;
+      /** Positive = statistics ahead of the score, which staleness cannot cause. */
+      delta_games?: number;
+      detail?: string;
+    } | null;
+    derived?: MatchStatisticsFamily;
+    measured?: MatchStatisticsFamily;
+  };
+  /** Present only when coverage is `none`. */
+  detail?: string;
+  players?: { p1?: MatchStatisticsSide; p2?: MatchStatisticsSide } | null;
+}
+
+/** One stroke of a charted rally. Shots are numbered from the serve: serve 1, return 2. */
+export interface RallyShot extends Extensible {
+  number?: number;
+  /** The charter's raw code, e.g. `'f'`. */
+  code?: string;
+  stroke?:
+    | 'serve' | 'groundstroke' | 'slice' | 'volley' | 'half_volley'
+    | 'swinging_volley' | 'overhead' | 'drop_shot' | 'lob' | 'trick'
+    | 'unknown' | null;
+  /** The side it was struck FROM. */
+  wing?: 'forehand' | 'backhand' | null;
+  /** Where the ball was sent. */
+  direction?: 'forehand_side' | 'middle' | 'backhand_side' | null;
+  depth?: 'shallow' | 'mid' | 'deep' | null;
+  position?: 'approaching' | 'at_net' | 'baseline' | null;
+}
+
+/**
+ * One charted point. `raw` is the charter's own string, verbatim, and is
+ * ALWAYS present; the parsed fields are our reading of it. `parsed` is false
+ * when the notation contained something we could not read cleanly — the
+ * recognised part is still returned. A consumer who wants only unambiguous
+ * rows filters on `parsed`.
+ */
+export interface RallyPoint extends Extensible {
+  point?: number;
+  set?: (number | null)[];
+  games?: (number | null)[];
+  /** e.g. `'30-40'`. */
+  score?: string | null;
+  game?: number | null;
+  is_tiebreak?: boolean;
+  server?: 1 | 2 | null;
+  point_winner?: 1 | 2 | null;
+  /** The charter's shot string; both serves joined by `';'` when the first was a fault. */
+  raw?: string | null;
+  parsed?: boolean;
+  serve_number?: 1 | 2 | null;
+  serve_direction?: 'wide' | 'body' | 'down_the_t' | null;
+  /** Strokes including the serve. An ace is 1, a double fault 0. */
+  rally_length?: number | null;
+  /** `error` = the charter recorded a miss without saying whether it was forced. Never guessed. */
+  outcome?: 'winner' | 'forced_error' | 'unforced_error' | 'error' | 'other' | null;
+  error_location?: 'net' | 'wide' | 'wide_and_deep' | 'deep' | null;
+  ending_stroke?: string | null;
+  ending_wing?: string | null;
+  is_ace?: boolean;
+  is_double_fault?: boolean;
+  is_serve_and_volley?: boolean;
+  shots?: RallyShot[];
+}
+
+/**
+ * A charted match — shot-by-shot data from the Match Charting Project.
+ * **ULTRA.** Rally construction is the layer BELOW the tape: the tape says
+ * what the score became after each point, this says how the point was played.
+ *
+ * It has its OWN id space (`rally_match_id`): the charted corpus reaches back
+ * decades and concentrates on the biggest events, so most charted matches
+ * have no counterpart in our own match table (`match_id` is null there).
+ */
+export interface RallyMatch extends Extensible {
+  /** The id this product is keyed on. */
+  rally_match_id?: number;
+  source_id?: string;
+  /** OUR match id, when the charted match is also one we hold. Null otherwise. */
+  match_id?: number | null;
+  date?: string | null;
+  tournament?: string | null;
+  round?: string | null;
+  surface?: string | null;
+  gender?: 'M' | 'W' | null;
+  best_of?: number | null;
+  players?: { name?: string | null; hand?: 'R' | 'L' | 'U' | 'A' | null }[];
+  /** Charted points in this match. */
+  points?: number;
+  /** How many of them our parser read cleanly — the per-match quality number. */
+  points_parsed?: number;
+}
+
+/**
+ * One charted match with its points in play order. Paged with
+ * `limit`/`offset`; `meta.total` is the match's full point count.
+ */
+export interface RallyMatchDetail extends RallyMatch {
+  rally?: RallyPoint[];
+  meta?: ListMeta;
+}
+
+/**
+ * Career shot-level charting aggregate for one player, summed over their
+ * charted matches. **ULTRA.** Every field is a raw SUM over the player's
+ * Total rows; `matches_charted` states the sample. Coverage is CURATED —
+ * 11,646 charted matches across both tours back to the 1960s, concentrated
+ * on the majors, NOT full-slate coverage.
+ */
+export interface ChartingPlayer extends Extensible {
+  player?: { name?: string } & Extensible;
+  matches_charted?: number;
+  coverage?: string;
+  /** Per-family summed numeric columns. */
+  families?: Record<string, Record<string, number | null>>;
+}
+
+/**
+ * Every Match Charting Project stat family for one charted match, both
+ * players, with the per-set split (row/set 1, 2, Total) exactly as charted.
+ * **ULTRA.** `charting_match_id` is this product's own id space.
+ */
+export interface ChartingMatch extends Extensible {
+  charting_match_id?: number;
+  mcp_id?: string;
+  gender?: string;
+  players?: Record<string, unknown>;
+  families?: Record<string, unknown>;
+}
+
+/**
+ * Package family of `/history/packages`. `tape` (the default) = point-by-point
+ * match tapes (PRO+ or a package subscription); `rally` = the charted rally
+ * corpus, keyed by YEAR not month (ULTRA); `rankings` = as-of ranking records
+ * (ULTRA).
+ */
+export type PackageKind = 'tape' | 'rally' | 'rankings';
+
+/** One downloadable file of a bulk package. */
+export interface PackageFile extends Extensible {
+  format?: 'jsonl' | 'csv';
+  filename?: string;
+  bytes?: number;
+  sha256?: string;
+}
+
+/**
+ * A published bulk package. Coverage is not a contiguous run of months and is
+ * still being extended backwards — treat the packages listing as the
+ * authoritative set of periods that exist. The JSONL file holds ONE LINE PER
+ * MATCH (a whole {@link Tape} object per line, coverage meta included); the
+ * CSV is flattened to one row per point and carries no coverage columns.
+ */
+export interface HistoryPackage extends Extensible {
+  /** `YYYY-MM` for tape/rankings packages. */
+  period?: string;
+  /** Only built packages are listed or served. */
+  status?: 'ready';
+  /** On a rankings package this is the number of players covered. */
+  match_count?: number | null;
+  /** On a rankings package this is the number of ranking records. */
+  row_count?: number | null;
+  files?: PackageFile[];
+  built_at?: string | null;
+  /** Present only on non-tape packages, so the shape a tape client already parses is unchanged. */
+  kind?: PackageKind;
+}
+
+/**
+ * A minted connection token for the high-fan-out push feed (Centrifugo).
+ * **ULTRA.**
+ *
+ * Connect a Centrifugo-protocol client (e.g. `centrifuge-js`) to `ws_url`
+ * with `token`, then subscribe to a channel from `channels`:
+ * `match:{match_id}` for one match's score frames, `slate:all` for every
+ * live score frame. Frames are the same score objects the polling endpoints
+ * return — including `win_probability_p1` and `danger`. The token is
+ * short-lived: mint a fresh one on reconnect.
+ */
+export interface WsToken extends Extensible {
+  token?: string;
+  /** Seconds until the token expires. */
+  expires_in?: number;
+  /** `wss://api.livetennisapi.com/connection/websocket` */
+  ws_url?: string;
+  /** Channel vocabulary, e.g. `{ match: 'match:{id}', slate: 'slate:all' }`. */
+  channels?: { match?: string; slate?: string } & Extensible;
+}
+
+/**
  * Games for one set as `[p1, p2]`, guarding the player-major layout.
  *
  * ```ts

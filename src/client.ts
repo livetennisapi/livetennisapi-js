@@ -13,6 +13,7 @@
  */
 
 import {
+  AbuseThrottled,
   APIConnectionError,
   APITimeoutError,
   RateLimited,
@@ -26,19 +27,30 @@ import type {
   ArchiveMatch,
   ArchivePlayerBio,
   ArchiveTour,
+  ChartingMatch,
+  ChartingPlayer,
   Coverage,
   Fixture,
   HeadToHead,
+  HistoryPackage,
   Market,
   Match,
   MatchEvent,
+  MatchStatistics,
   MatchStatus,
+  PackageKind,
+  RallyMatch,
+  RallyMatchDetail,
+  RankingsPage,
+  RankingSystem,
   RoundCode,
+  Tape,
   Tour,
   Tournament,
   Page,
   Player,
   Score,
+  WsToken,
 } from './types.js';
 
 import { VERSION } from './version.js';
@@ -48,13 +60,26 @@ const MAX_LIMIT = 200;
 
 /**
  * Endpoints needing more than the FREE floor, so a 403 can name the tier.
- * Order matters: the first marker that matches the path wins, so the more
- * specific `/history` sits above nothing it could shadow.
+ * Order matters: the first marker that matches the path wins, so every marker
+ * that can appear inside a `/history/…` path sits above the BASIC `/history`
+ * catch-all.
  */
 const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/analysis', 'ULTRA'],
+  ['/statistics', 'ULTRA'],
+  // `/rally` also matches `/history/matches/{id}/rally`, so it must sit above
+  // the BASIC `/history` marker.
+  ['/rally', 'ULTRA'],
+  ['/charting', 'ULTRA'],
+  ['/ws-token', 'ULTRA'],
   ['/events', 'PRO'],
   ['/markets', 'PRO'],
+  // `/packages` matches `/history/packages` — above `/history` for the same
+  // reason as `/rally`.
+  ['/packages', 'PRO'],
+  // The PRO listing mode; the ULTRA per-player mode overrides this with an
+  // explicit hint from `listRankings()`.
+  ['/rankings', 'PRO'],
   ['/history', 'BASIC'],
   ['/h2h', 'BASIC'],
 ];
@@ -180,7 +205,11 @@ export class LiveTennisAPI {
     return Math.min(500 * 2 ** attempt + Math.random() * 250, 10_000);
   }
 
-  private async request<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+  private async request<T>(
+    path: string,
+    params?: Record<string, unknown>,
+    requiredTier?: Tier,
+  ): Promise<T> {
     const url = this.url(path, params);
 
     for (let attempt = 0; ; attempt += 1) {
@@ -208,17 +237,29 @@ export class LiveTennisAPI {
       }
 
       if (this.shouldRetry(response.status) && attempt < this.maxRetries) {
-        // Drain the discarded body, or undici holds the connection until GC.
-        try {
-          await response.body?.cancel();
-        } catch {
-          /* already consumed or unsupported */
+        if (response.status === 429) {
+          // Not every 429 is worth retrying. A daily 429 (`scope: "day"`) does
+          // not lift until the daily reset, and `abuse_throttled` is a ~24h
+          // block that counts rejected requests — retrying either inside a
+          // request is exactly the loop the API is telling you to fix.
+          const body = await this.decode(response);
+          const shape = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+          if (shape.error === 'abuse_throttled' || shape.scope === 'day') {
+            this.throwFor(response, path, url, body, requiredTier);
+          }
+        } else {
+          // Drain the discarded body, or undici holds the connection until GC.
+          try {
+            await response.body?.cancel();
+          } catch {
+            /* already consumed or unsupported */
+          }
         }
         await sleep(this.backoff(attempt, retryAfterSeconds(response.headers)));
         continue;
       }
 
-      if (!response.ok) await this.throwFor(response, path, url);
+      if (!response.ok) this.throwFor(response, path, url, await this.decode(response), requiredTier);
       return (await this.decode(response)) as T;
     }
   }
@@ -231,8 +272,13 @@ export class LiveTennisAPI {
     }
   }
 
-  private async throwFor(response: Response, path: string, url: string): Promise<never> {
-    const body = await this.decode(response);
+  private throwFor(
+    response: Response,
+    path: string,
+    url: string,
+    body: unknown,
+    requiredTier?: Tier,
+  ): never {
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       headers[key] = value;
@@ -241,16 +287,33 @@ export class LiveTennisAPI {
     // Truthiness, not `??`: an `{"error": null}` body or an empty statusText
     // (HTTP/2 has none) must fall through to the generic message rather than
     // surface as the string "null" or "". Matches the Python client.
-    const raw = body && typeof body === 'object' ? (body as { error?: unknown }).error : undefined;
+    const shape = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const raw = shape.error;
     const code = typeof raw === 'string' && raw ? raw : undefined;
     const message = code || response.statusText || 'request failed';
     const options = { status: response.status, body, headers, url };
 
     if (response.status === 403) {
-      throw new UpgradeRequired(message, { ...options, requiredTier: requiredTierFor(path) });
+      throw new UpgradeRequired(message, {
+        ...options,
+        requiredTier: requiredTier ?? requiredTierFor(path),
+      });
     }
     if (response.status === 429) {
-      throw new RateLimited(message, { ...options, retryAfter: retryAfterSeconds(response.headers) });
+      const retryAfter = retryAfterSeconds(response.headers);
+      if (code === 'abuse_throttled') {
+        throw new AbuseThrottled(message, {
+          ...options,
+          retryAfter,
+          retryAtEpoch: typeof shape.retry_at_epoch === 'number' ? shape.retry_at_epoch : undefined,
+        });
+      }
+      throw new RateLimited(message, {
+        ...options,
+        retryAfter,
+        // Daily 429s only — the absolute instant the allowance returns.
+        resetsAt: typeof shape.resets_at === 'string' ? shape.resets_at : undefined,
+      });
     }
     const Cls = errorForStatus(response.status);
     throw new Cls(message, options);
@@ -453,6 +516,178 @@ export class LiveTennisAPI {
    */
   getH2H(p1: string, p2: string): Promise<HeadToHead> {
     return this.request('/h2h', { p1, p2 });
+  }
+
+  /**
+   * In-play statistics for one match — aces, double faults, serve split,
+   * hold/break %, break points, service and return points. **ULTRA.**
+   *
+   * Two families, deliberately not merged: DERIVED (rebuilt from the
+   * point-by-point record) at the top level of `players.pN`, and MEASURED
+   * (counted upstream — the only source of aces and double faults) under
+   * `players.pN.measured`. Measured coverage is not uniform: an absent field
+   * is omitted, never zero-filled. Branch on `freshness.derived` /
+   * `freshness.measured`, and never compare their `age_seconds` — they use
+   * different clocks. `coverage: 'none'` is a 200 with null `players`, not a
+   * 404.
+   */
+  getMatchStatistics(matchId: number): Promise<MatchStatistics> {
+    return this.request(`/matches/${matchId}/statistics`);
+  }
+
+  /**
+   * The per-match tape: point-by-point score sequence + per-point model
+   * probabilities. **BASIC** (or any History plan).
+   *
+   * Works on a LIVE match, not only a completed one — the tape is assembled
+   * from whatever has been committed so far. `sequence: 'raw'` (the default)
+   * is every row we committed, deliberately non-monotonic (independent
+   * sources race, and a higher-trust one may correct a lower-trust one
+   * backwards); `'clean'` returns one row per distinct score state and is the
+   * only sequence that carries `point_winner`. Check `meta.coverage` and
+   * `meta.point_source` before backtesting.
+   */
+  getMatchTape(matchId: number, params: { sequence?: 'raw' | 'clean' } = {}): Promise<Tape> {
+    return this.request(`/history/matches/${matchId}`, params);
+  }
+
+  /**
+   * Charted matches with shot-by-shot data, newest first. **ULTRA.**
+   *
+   * Rally construction is the layer BELOW the tape: the tape says what the
+   * score became after each point, this says how the point was played. It has
+   * its OWN id space — ask this endpoint for the authoritative coverage list
+   * rather than assuming a match is charted; charting is human work, so
+   * coverage is deep, not universal. `player` is a substring match on either
+   * player name.
+   */
+  listRallyMatches(
+    params: {
+      player?: string;
+      from?: string;
+      to?: string;
+      surface?: string;
+      gender?: 'M' | 'W';
+    } & ListParams = {},
+  ): Promise<Page<RallyMatch>> {
+    return this.request('/rally/matches', params);
+  }
+
+  /**
+   * Rally construction for one charted match, points in play order. **ULTRA.**
+   * Paged with `limit`/`offset`; `meta.total` is the match's full point count.
+   */
+  getRallyMatch(rallyMatchId: number, params: ListParams = {}): Promise<RallyMatchDetail> {
+    return this.request(`/rally/matches/${rallyMatchId}`, params);
+  }
+
+  /**
+   * Rally construction addressed by OUR match id, resolved through the
+   * optional link. **ULTRA.**
+   *
+   * A 404 `not_charted` means we hold the match but nobody charted it —
+   * deliberately distinct from "no such match", because most of our matches
+   * are not charted and a consumer walking the archive must tell them apart
+   * (read `err.errorCode`).
+   */
+  getMatchRally(matchId: number, params: ListParams = {}): Promise<RallyMatchDetail> {
+    return this.request(`/history/matches/${matchId}/rally`, params);
+  }
+
+  /**
+   * Career shot-level charting aggregate for one player — serve placement,
+   * return depth, net play, clutch serving, winners/errors by wing, rally
+   * tendencies — summed over their charted matches. **ULTRA.**
+   *
+   * `name` (min 3 chars) is the key; a fragment matching more than one
+   * charted person is refused with a 400 carrying candidates — pass
+   * `gender: 'men' | 'women'` to disambiguate.
+   */
+  getChartingPlayer(name: string, params: { gender?: 'men' | 'women' } = {}): Promise<ChartingPlayer> {
+    return this.request('/charting/players', { name, ...params });
+  }
+
+  /**
+   * One charted match — every Match Charting Project stat family for both
+   * players, with the per-set split exactly as charted. **ULTRA.**
+   * `chartingMatchId` is this product's own id space.
+   */
+  getChartingMatch(chartingMatchId: number): Promise<ChartingMatch> {
+    return this.request(`/charting/matches/${chartingMatchId}`);
+  }
+
+  /**
+   * Point-in-time rankings, per system. TWO modes:
+   *
+   * - **Listing (PRO)** — omit `player`: the FULL published table in rank
+   *   order for exactly one `system`, the newest week at or before `as_of`.
+   *   Rows carry `player_name` as published and a null `player_id` for
+   *   players outside our roster, so the table has no silent holes. `utr`
+   *   has no listing (a rating, not a ranking).
+   * - **Per-player as-of (ULTRA)** — pass `player` ids (repeatable, max 50):
+   *   the newest record per system effective ON OR BEFORE `as_of`, never one
+   *   dated after it. This is the point-in-time answer — every other ranking
+   *   field in this API is the player's CURRENT value joined at read time.
+   *
+   * Read `meta.coverage` before trusting an empty result: ITF and UTR
+   * history begins 2026-07-29 and cannot be reconstructed earlier.
+   */
+  listRankings(
+    params: {
+      player?: number | number[];
+      /** `YYYY-MM-DD`. Omit for the latest known record. */
+      as_of?: string;
+      system?: RankingSystem | RankingSystem[];
+    } & ListParams = {},
+  ): Promise<RankingsPage> {
+    // The 403 tier depends on the MODE, which the path alone cannot say:
+    // per-player is ULTRA, the listing is PRO.
+    return this.request('/rankings', params, params.player !== undefined ? 'ULTRA' : 'PRO');
+  }
+
+  /**
+   * Pre-built bulk packages, newest period first. **PRO** (or a package
+   * subscription); `kind: 'rally' | 'rankings'` and `year` need ULTRA (or,
+   * for `year`, History Business / a 1-year package).
+   *
+   * `kind` defaults to `'tape'` server-side, so a tape-only client never
+   * sees a new kind of row appear. `year: 'YYYY'` lists every published
+   * month of that year in one call. Treat this listing as the authoritative
+   * set of periods that exist — coverage is not contiguous and is still
+   * being extended backwards.
+   */
+  listHistoryPackages(params: { kind?: PackageKind; year?: string } = {}): Promise<Page<HistoryPackage>> {
+    return this.request('/history/packages', params);
+  }
+
+  /**
+   * One bulk package's manifest — file set, counts, sha256. **PRO** (or a
+   * package subscription); `kind: 'rally' | 'rankings'` needs ULTRA.
+   *
+   * `period` is `YYYY-MM` (rally packages are keyed by year). The manifest
+   * names the downloadable files; fetch the file itself with
+   * `?format=jsonl|csv` outside this client — it streams as an attachment,
+   * not JSON.
+   */
+  getHistoryPackage(period: string, params: { kind?: PackageKind } = {}): Promise<HistoryPackage> {
+    return this.request(`/history/packages/${encodeURIComponent(period)}`, params);
+  }
+
+  /**
+   * Mint a short-lived connection token for the high-fan-out push feed
+   * (Centrifugo). **ULTRA.**
+   *
+   * Connect a Centrifugo-protocol client (e.g. `centrifuge-js`) to
+   * `ws_url` with `token`, then subscribe to `match:{id}` for one match or
+   * `slate:all` for every live score frame — the exact channel names are in
+   * `channels`. Frames are the same score objects the polling endpoints
+   * return, model fields included. Mint a fresh token on reconnect.
+   *
+   * This is a separate transport from {@link LiveScoreStream} (the native
+   * `/ws` feed): same data, built for high fan-out.
+   */
+  getWsToken(): Promise<WsToken> {
+    return this.request('/ws-token');
   }
 
   // -- pagination -------------------------------------------------------------

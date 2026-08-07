@@ -14,6 +14,11 @@
  * `ping` heartbeat roughly every 15s. Heartbeats are consumed internally and
  * never yielded.
  *
+ * Score frames carry the model fields — `win_probability_p1` and `danger` —
+ * exactly like the REST score reads (the whole feed is ULTRA). A null there
+ * means the model had no output for that state, not that the field was left
+ * unstamped.
+ *
  * Pass `signals: ['break_point']` to also receive the headline break-point feed:
  * `break_point` frames (yielded as {@link BreakPoint}) the instant a break point
  * arises and `break_point_result` frames ({@link BreakPointResult}) when it
