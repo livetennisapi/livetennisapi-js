@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  AbuseThrottled,
   BadRequest,
   LiveTennisAPI,
   NotFound,
@@ -112,6 +113,73 @@ describe('error mapping', () => {
     await expect(client.getH2H('federer', 'nadal')).rejects.toMatchObject({ requiredTier: 'BASIC' });
   });
 
+  it('names ULTRA on a statistics 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getMatchStatistics(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('names ULTRA on every rally 403, whichever id space addressed it', async () => {
+    // `/rally/matches` and `/history/matches/{id}/rally` are the same ULTRA
+    // product; the `/history` prefix of the latter must not demote it to BASIC.
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listRallyMatches()).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+    await expect(client.getRallyMatch(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+    await expect(client.getMatchRally(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('names ULTRA on a charting 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getChartingPlayer('federer')).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+    await expect(client.getChartingMatch(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('names ULTRA on a ws-token 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getWsToken()).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('names PRO on a packages 403 (not BASIC via the /history prefix)', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listHistoryPackages()).rejects.toMatchObject({ requiredTier: 'PRO' });
+    await expect(client.getHistoryPackage('2026-07')).rejects.toMatchObject({ requiredTier: 'PRO' });
+  });
+
+  it('names the tier by MODE on a rankings 403', async () => {
+    // The path alone cannot say which mode was refused: the listing is PRO,
+    // per-player as-of records are ULTRA.
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.listRankings({ system: 'atp' })).rejects.toMatchObject({ requiredTier: 'PRO' });
+    await expect(client.listRankings({ player: 925 })).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('surfaces resetsAt on a daily 429', async () => {
+    const { client } = clientReturning(
+      json(429, {
+        error: 'rate_limited',
+        scope: 'day',
+        limit_per_day: 100,
+        resets_at: '2026-08-07T22:00:00Z',
+      }),
+      { maxRetries: 0 },
+    );
+    const err = await client.getMatch(1).catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimited);
+    expect(err.resetsAt).toBe('2026-08-07T22:00:00Z');
+    expect(err.message).toContain('2026-08-07T22:00:00Z');
+  });
+
+  it('maps abuse_throttled to its own class with retryAtEpoch', async () => {
+    const { client } = clientReturning(
+      json(429, { error: 'abuse_throttled', retry_at_epoch: 1_800_000_000 }),
+      { maxRetries: 0 },
+    );
+    const err = await client.getMatch(1).catch((e) => e);
+    expect(err).toBeInstanceOf(AbuseThrottled);
+    expect(err).toBeInstanceOf(RateLimited); // catch RateLimited still catches it
+    expect(err.retryAtEpoch).toBe(1_800_000_000);
+    expect(err.errorCode).toBe('abuse_throttled');
+  });
+
   it('surfaces ambiguous_name candidates on the error body', async () => {
     // /h2h and /history/archive/career refuse a fragment matching more than
     // one player — summing two people into one record would be a wrong answer.
@@ -195,6 +263,28 @@ describe('retries', () => {
     const { client, calls } = clientReturning(json(500, {}), { maxRetries: 2 });
     await expect(client.getMatch(1)).rejects.toBeInstanceOf(ServerError);
     expect(calls).toHaveLength(3);
+  });
+
+  it('never retries a daily 429', async () => {
+    // The daily allowance does not come back until the reset instant; no
+    // backoff inside a request survives to it.
+    const { client, calls } = clientReturning(
+      json(429, { error: 'rate_limited', scope: 'day', resets_at: '2026-08-07T22:00:00Z' }),
+      { maxRetries: 3 },
+    );
+    await expect(client.getMatch(1)).rejects.toBeInstanceOf(RateLimited);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never retries abuse_throttled', async () => {
+    // A ~24h block that counts rejected requests — retrying it is exactly the
+    // loop the API is telling you to fix.
+    const { client, calls } = clientReturning(
+      json(429, { error: 'abuse_throttled', retry_at_epoch: 1_800_000_000 }),
+      { maxRetries: 3 },
+    );
+    await expect(client.getMatch(1)).rejects.toBeInstanceOf(AbuseThrottled);
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -292,6 +382,81 @@ describe('requests', () => {
     const { client, calls } = clientReturning(json(200, {}));
     await client.getH2H('federer', 'nadal');
     expect(calls[0]!.url).toContain(`${BASE}/h2h?p1=federer&p2=nadal`);
+  });
+
+  it('builds the statistics path', async () => {
+    const { client, calls } = clientReturning(json(200, {}));
+    await client.getMatchStatistics(18953);
+    expect(calls[0]!.url).toContain(`${BASE}/matches/18953/statistics`);
+  });
+
+  it('builds the tape path and passes sequence through', async () => {
+    const { client, calls } = clientReturning(json(200, {}));
+    await client.getMatchTape(18953);
+    expect(calls[0]!.url).toContain(`${BASE}/history/matches/18953`);
+    expect(calls[0]!.url).not.toContain('sequence=');
+    await client.getMatchTape(18953, { sequence: 'clean' });
+    expect(calls[1]!.url).toContain('sequence=clean');
+  });
+
+  it('builds the rally paths and filters', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listRallyMatches({ player: 'sampras', gender: 'M', from: '1990-01-01', surface: 'grass' });
+    expect(calls[0]!.url).toContain(`${BASE}/rally/matches?`);
+    expect(calls[0]!.url).toContain('player=sampras');
+    expect(calls[0]!.url).toContain('gender=M');
+    expect(calls[0]!.url).toContain('surface=grass');
+    await client.getRallyMatch(4242, { limit: 100, offset: 200 });
+    expect(calls[1]!.url).toContain(`${BASE}/rally/matches/4242?`);
+    expect(calls[1]!.url).toContain('limit=100');
+    await client.getMatchRally(18953);
+    expect(calls[2]!.url).toContain(`${BASE}/history/matches/18953/rally`);
+  });
+
+  it('builds the charting paths', async () => {
+    const { client, calls } = clientReturning(json(200, {}));
+    await client.getChartingPlayer('graf', { gender: 'women' });
+    expect(calls[0]!.url).toContain(`${BASE}/charting/players?`);
+    expect(calls[0]!.url).toContain('name=graf');
+    expect(calls[0]!.url).toContain('gender=women');
+    await client.getChartingMatch(777);
+    expect(calls[1]!.url).toContain(`${BASE}/charting/matches/777`);
+  });
+
+  it('builds both rankings modes, repeating player and system', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listRankings({ system: 'atp', as_of: '2026-07-01', limit: 100 });
+    expect(calls[0]!.url).toContain(`${BASE}/rankings?`);
+    expect(calls[0]!.url).toContain('system=atp');
+    expect(calls[0]!.url).toContain('as_of=2026-07-01');
+    await client.listRankings({ player: [925, 1137], system: ['atp', 'utr'] });
+    expect(calls[1]!.url).toContain('player=925&player=1137');
+    expect(calls[1]!.url).toContain('system=atp&system=utr');
+  });
+
+  it('builds the packages paths with kind and year', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listHistoryPackages();
+    expect(calls[0]!.url).not.toContain('kind=');
+    await client.listHistoryPackages({ kind: 'rankings', year: '2025' });
+    expect(calls[1]!.url).toContain('kind=rankings');
+    expect(calls[1]!.url).toContain('year=2025');
+    await client.getHistoryPackage('2026-07', { kind: 'rally' });
+    expect(calls[2]!.url).toContain(`${BASE}/history/packages/2026-07?kind=rally`);
+  });
+
+  it('builds the ws-token path', async () => {
+    const { client, calls } = clientReturning(
+      json(200, {
+        token: 'x',
+        expires_in: 300,
+        ws_url: 'wss://api.livetennisapi.com/connection/websocket',
+        channels: { match: 'match:{match_id}', slate: 'slate:all' },
+      }),
+    );
+    const tok = await client.getWsToken();
+    expect(calls[0]!.url).toContain(`${BASE}/ws-token`);
+    expect(tok.channels?.slate).toBe('slate:all');
   });
 });
 

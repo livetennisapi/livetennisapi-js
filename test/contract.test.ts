@@ -103,3 +103,89 @@ withKey('tier boundaries', () => {
     }
   });
 });
+
+withKey('the 1.4.0 surface', () => {
+  // Same contract as the tier boundaries above: either the call works with
+  // the documented shape, or it throws UpgradeRequired naming the right tier.
+  it('serves the tape, clean rows carrying point_winner where attributable', async () => {
+    const page = await client.listCompletedMatches({ limit: 1 });
+    if (!page.data.length) return;
+    try {
+      const tape = await client.getMatchTape(page.data[0]!.id!, { sequence: 'clean' });
+      expect(tape.meta?.sequence).toBe('clean');
+      for (const row of tape.tape ?? []) {
+        expect([1, 2, null, undefined]).toContain(row.point_winner);
+      }
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('BASIC');
+    }
+  });
+
+  it('statistics is ULTRA-gated and honest about coverage none', async () => {
+    const page = await client.listCompletedMatches({ limit: 1 });
+    if (!page.data.length) return;
+    try {
+      const stats = await client.getMatchStatistics(page.data[0]!.id!);
+      expect(['live', 'final', 'stale', 'none', 'diverged']).toContain(stats.coverage);
+      if (stats.coverage === 'none') expect(stats.players).toBeNull();
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('ULTRA');
+    }
+  });
+
+  it('rankings listing is PRO-gated; systems are never collapsed', async () => {
+    try {
+      const page = await client.listRankings({ system: 'atp', limit: 5 });
+      for (const row of page.data) expect(row.system).toBe('atp');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('PRO');
+    }
+  });
+
+  it('per-player rankings are ULTRA-gated', async () => {
+    try {
+      await client.listRankings({ player: 1, as_of: '2026-08-01' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('ULTRA');
+    }
+  });
+
+  it('rally construction is ULTRA-gated, in its own id space', async () => {
+    try {
+      const page = await client.listRallyMatches({ limit: 3 });
+      for (const m of page.data) expect(m.rally_match_id).toBeTypeOf('number');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('ULTRA');
+    }
+  });
+
+  it('packages are PRO-gated with sha256 manifests', async () => {
+    try {
+      const page = await client.listHistoryPackages();
+      for (const pkg of page.data) {
+        expect(pkg.period).toBeTypeOf('string');
+        for (const f of pkg.files ?? []) expect(f.sha256).toBeTypeOf('string');
+      }
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('PRO');
+    }
+  });
+
+  it('ws-token is ULTRA-gated and names the slate channel', async () => {
+    try {
+      const tok = await client.getWsToken();
+      expect(tok.token).toBeTypeOf('string');
+      expect(tok.ws_url).toContain('wss://');
+      expect(tok.channels?.slate).toBe('slate:all');
+    } catch (err) {
+      expect(err).toBeInstanceOf(UpgradeRequired);
+      expect((err as UpgradeRequired).requiredTier).toBe('ULTRA');
+    }
+  });
+});

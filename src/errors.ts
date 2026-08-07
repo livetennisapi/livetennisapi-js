@@ -93,17 +93,59 @@ export class UpgradeRequired extends APIStatusError {
 /** 404 — no such resource, or no data for it yet. */
 export class NotFound extends APIStatusError {}
 
-/** 429 — the tier's rate-limit window was exceeded. */
+/**
+ * 429 — the tier's rate-limit window was exceeded.
+ *
+ * Two shapes share this class, told apart by the body:
+ * - **per-minute** (`rate_limited`) — transient; wait `retryAfter` seconds.
+ * - **daily** (`rate_limited` with `scope: "day"`) — the day's allowance is
+ *   spent. `resetsAt` is the absolute ISO instant the allowance returns —
+ *   trust it verbatim (it is derived from the service's LOCAL midnight, so
+ *   never assume a UTC-midnight reset).
+ *   The client does not retry these: no backoff inside a request survives to
+ *   the reset.
+ */
 export class RateLimited extends APIStatusError {
   /** Seconds the API asked you to wait, from `Retry-After`. */
   readonly retryAfter?: number;
+  /** Daily 429s only — the absolute ISO instant the daily allowance resets. */
+  readonly resetsAt?: string;
 
-  constructor(message: string, options: APIErrorOptions & { retryAfter?: number }) {
+  constructor(message: string, options: APIErrorOptions & { retryAfter?: number; resetsAt?: string }) {
     super(
-      options.retryAfter !== undefined ? `${message} — retry after ${options.retryAfter}s` : message,
+      options.resetsAt !== undefined
+        ? `${message} — daily allowance spent, resets at ${options.resetsAt}`
+        : options.retryAfter !== undefined
+          ? `${message} — retry after ${options.retryAfter}s`
+          : message,
       options,
     );
     this.retryAfter = options.retryAfter;
+    this.resetsAt = options.resetsAt;
+  }
+}
+
+/**
+ * 429 `abuse_throttled` — the key massively exceeded its daily cap (rejected
+ * requests count too) and is blocked for ~24h. This is not a rate limit to
+ * back off from inside a request: it names a broken client retry loop. Fix
+ * the loop, then resume after `retryAtEpoch`. Never retried by this client.
+ */
+export class AbuseThrottled extends RateLimited {
+  /** Unix epoch seconds after which requests will be accepted again. */
+  readonly retryAtEpoch?: number;
+
+  constructor(
+    message: string,
+    options: APIErrorOptions & { retryAfter?: number; retryAtEpoch?: number },
+  ) {
+    super(message, options);
+    this.retryAtEpoch = options.retryAtEpoch;
+    // Composed after super(), replacing any retry-after suffix the parent
+    // added: "retry after 60s" is exactly the wrong reading of this error.
+    if (options.retryAtEpoch !== undefined) {
+      this.message = `${message} — throttled for chronic over-cap use; fix the retry loop and resume after ${new Date(options.retryAtEpoch * 1000).toISOString()}`;
+    }
   }
 }
 

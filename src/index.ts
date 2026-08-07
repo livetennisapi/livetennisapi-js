@@ -3,8 +3,8 @@
  * [Live Tennis API](https://livetennisapi.com).
  *
  * Real-time tennis scores, players, rankings, match-winner market prices and
- * model win-probability for ATP, WTA, Challenger and ITF — over REST and
- * WebSocket.
+ * model win-probability for ATP, WTA, Challenger, ITF and juniors — over REST
+ * and WebSocket.
  *
  * ```ts
  * import { LiveTennisAPI } from 'livetennisapi';
@@ -32,6 +32,7 @@ export {
   UpgradeRequired,
   NotFound,
   RateLimited,
+  AbuseThrottled,
   ServerError,
   ServiceUnavailable,
 } from './errors.js';
@@ -47,17 +48,39 @@ export type {
   ArchiveTour,
   BreakPoint,
   BreakPointResult,
+  ChartingMatch,
+  ChartingPlayer,
   Coverage,
   Extensible,
   Fixture,
   HeadToHead,
   HeadToHeadMeeting,
+  HistoryPackage,
   ListMeta,
   Market,
   Match,
   MatchEvent,
+  MatchStatistics,
+  MatchStatisticsFamily,
+  MatchStatisticsMeasured,
+  MatchStatisticsSide,
   MatchStatus,
+  PackageFile,
+  PackageKind,
+  PointSource,
+  RallyMatch,
+  RallyMatchDetail,
+  RallyPoint,
+  RallyShot,
+  RankingListMeta,
+  RankingRecord,
+  RankingsPage,
+  RankingSystem,
   RoundCode,
+  StatisticsCoverage,
+  Tape,
+  TapeRow,
+  TiebreakScore,
   Tour,
   Tournament,
   TournamentCategory,
@@ -67,6 +90,7 @@ export type {
   Score,
   ScoreUpdate,
   StreamFrame,
+  WsToken,
 } from './types.js';
 
 export { VERSION } from './version.js';
