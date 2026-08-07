@@ -10,6 +10,13 @@ permissions:
   contents: read
 
 jobs:
+  truthcheck:
+    name: truth-pin (product facts match ground truth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/truthcheck.sh
+
   test:
     name: test on node ${{ matrix.node }}
     runs-on: ubuntu-latest
