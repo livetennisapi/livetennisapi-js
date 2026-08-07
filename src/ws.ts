@@ -6,7 +6,7 @@
  *
  * const stream = new LiveScoreStream({ apiKey: 'twjp_…' });
  * for await (const update of stream) {
- *   console.log(update.match_id, update.sets);
+ *   if (update.type === 'score') console.log(update.match_id, update.score?.sets);
  * }
  * ```
  *
@@ -14,10 +14,11 @@
  * `ping` heartbeat roughly every 15s. Heartbeats are consumed internally and
  * never yielded.
  *
- * Score frames carry the model fields — `win_probability_p1` and `danger` —
- * exactly like the REST score reads (the whole feed is ULTRA). A null there
- * means the model had no output for that state, not that the field was left
- * unstamped.
+ * Score frames NEST their payload under `.score` — the same allowlist object
+ * the REST score reads return, model fields (`win_probability_p1`, `danger`)
+ * included (the whole feed is ULTRA). Read `frame.score.sets`, never
+ * `frame.sets`. A null model field means the model had no output for that
+ * state, not that the field was left unstamped.
  *
  * Pass `signals: ['break_point']` to also receive the headline break-point feed:
  * `break_point` frames (yielded as {@link BreakPoint}) the instant a break point
@@ -241,9 +242,9 @@ export class LiveScoreStream {
           });
         });
 
-        // The server keys off `topics` (+ optional `signals`); `action` is
-        // ignored but kept for forward compatibility.
-        const subscribe: Record<string, unknown> = { action: 'subscribe', topics: this.topics };
+        // The documented subscribe frame is `{topics, signals?}` — exactly
+        // what the server reads, nothing more.
+        const subscribe: Record<string, unknown> = { topics: this.topics };
         if (this.signals.length) subscribe.signals = this.signals;
         socket.send(JSON.stringify(subscribe));
 
