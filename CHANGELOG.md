@@ -3,6 +3,72 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-08-07
+
+### Added
+- **The per-match tape.** `getMatchTape(matchId, { sequence })` (BASIC, or any
+  History plan) — the point-by-point score sequence with per-point model
+  probabilities, working on LIVE matches too. `sequence: 'clean'` collapses
+  corrections to one row per distinct score state and is the only sequence
+  carrying the new `point_winner` field; the response's `tiebreaks` array
+  holds per-set tiebreak final scores from observed states only. Check
+  `meta.coverage` / `meta.point_source` before backtesting.
+- **In-play statistics.** `getMatchStatistics(matchId)` (ULTRA) — aces, double
+  faults, the serve split, hold/break %, break points, service and return
+  points, in two deliberately unmerged families: DERIVED (rebuilt from the
+  tape) and MEASURED (counted upstream), each with its own freshness and
+  coverage. Absent measured fields are omitted, never zero-filled.
+- **Point-in-time rankings.** `listRankings()` (both modes of `/rankings`):
+  the rank-ordered listing of one system (PRO) and per-player as-of records
+  (ULTRA) — the newest record effective on or before `as_of`, never one dated
+  after it. Rows carry `previous_rank` (ATP/WTA). A 403 names the tier by
+  MODE, which the path alone cannot say.
+- **Shot-by-shot rally construction and charting** (ULTRA, Match Charting
+  Project corpus, its own id space): `listRallyMatches()`, `getRallyMatch()`,
+  `getMatchRally()` (by OUR match id — 404 `not_charted` is distinct from "no
+  such match"), `getChartingPlayer(name)` career aggregates and
+  `getChartingMatch(id)` per-match stat families.
+- **Bulk packages.** `listHistoryPackages({ kind, year })` and
+  `getHistoryPackage(period, { kind })` (PRO+, or a package subscription) —
+  pre-built month packages of tape as JSONL/CSV with sha256 manifests.
+  `kind: 'rally' | 'rankings'` and the `year` archive listing need ULTRA.
+- **Push feed.** `getWsToken()` (ULTRA) mints a short-lived token for the
+  Centrifugo high-fan-out push endpoint — connect any Centrifugo-protocol
+  client to `ws_url` and subscribe to `match:{id}` or `slate:all`. A second
+  transport next to `LiveScoreStream`, built for fan-out.
+- **429s you can act on.** A daily 429 now surfaces `resetsAt` — the absolute
+  ISO instant the allowance returns (derived from the service's local
+  midnight; it is NOT midnight UTC). The `abuse_throttled` 429 (a ~24h block
+  for chronic over-cap use) gets its own `AbuseThrottled` class carrying
+  `retryAtEpoch`; it extends `RateLimited`, so existing catches keep working.
+- New exported types: `Tape`, `TapeRow`, `TiebreakScore`, `PointSource`,
+  `MatchStatistics` (+`Side`/`Measured`/`Family`, `StatisticsCoverage`),
+  `RankingRecord`, `RankingSystem`, `RankingListMeta`, `RankingsPage`,
+  `RallyMatch`, `RallyMatchDetail`, `RallyPoint`, `RallyShot`,
+  `ChartingPlayer`, `ChartingMatch`, `HistoryPackage`, `PackageFile`,
+  `PackageKind`, `WsToken`.
+
+### Changed
+- **The client no longer retries a 429 that retrying cannot fix.** A daily
+  429 (`scope: "day"`) does not lift until the reset instant, and
+  `abuse_throttled` is the block that counting retries earned — both now
+  throw immediately instead of burning up to `maxRetries` backoffs.
+  Per-minute 429s and 5xx retry exactly as before.
+- WebSocket docs state that `score` frames carry `win_probability_p1` and
+  `danger` like the REST reads (the feed is ULTRA); a `null` means the model
+  had no output for that state.
+- README: quota table for the current grid (FREE 100/day, BASIC 1,000, PRO
+  10,000, ULTRA 500,000 — the 2026-08-06 quotas), free-key polling guidance
+  (≥15 min; always-on dashboards belong on BASIC), tier table rows for the
+  whole new surface, and the five-tour phrasing — ATP, WTA, Challenger, ITF
+  and juniors.
+
+### Notes
+- **Fully backwards compatible** for every non-error path: additions are new
+  methods, new optional parameters, and new optional fields on `Extensible`
+  types. The only behavioural change is the non-retry of daily/abuse 429s
+  described above.
+
 ## [1.3.0] — 2026-08-03
 
 ### Added

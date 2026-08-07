@@ -7,7 +7,7 @@
 **Official JavaScript / TypeScript client for the [Live Tennis API](https://livetennisapi.com).**
 
 Real-time tennis scores, players, rankings, match-winner market prices and model
-win-probability — for ATP, WTA, Challenger and ITF, over REST and WebSocket.
+win-probability — for ATP, WTA, Challenger, ITF and juniors, over REST and WebSocket.
 
 [![npm](https://img.shields.io/npm/v/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
 [![types](https://img.shields.io/npm/types/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
@@ -108,6 +108,25 @@ With no `signals` the stream behaves exactly as before — score frames only. Bo
 the feed and its fields are ULTRA-only. A runnable example lives in
 [`livetennisapi-starter-node`](https://github.com/livetennisapi/livetennisapi-starter-node).
 
+Score frames carry the model fields — `win_probability_p1` and `danger` — just
+like the REST score reads (the whole feed is ULTRA). A `null` there means the
+model had no output for that state, not a missing feature.
+
+### Push feed (Centrifugo)
+
+For high fan-out there is a second transport: `getWsToken()` (ULTRA) mints a
+short-lived token for a Centrifugo push endpoint. Connect any
+Centrifugo-protocol client (e.g. [`centrifuge-js`](https://www.npmjs.com/package/centrifuge))
+to `ws_url` and subscribe to `match:{id}` for one match or `slate:all` for
+every live score frame — the exact channel names come back in `channels`:
+
+```ts
+const { token, ws_url, channels } = await client.getWsToken();
+// channels.slate === 'slate:all', channels.match === 'match:{match_id}'
+// Frames are the same score objects the polling endpoints return,
+// win_probability_p1 and danger included. Mint a fresh token on reconnect.
+```
+
 ## Tiers
 
 | | FREE | BASIC | PRO | ULTRA |
@@ -115,12 +134,33 @@ the feed and its fields are ULTRA-only. A runnable example lives in
 | `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ | ✅ |
 | `searchPlayers` `getPlayer` `listFixtures` | ✅ | ✅ | ✅ | ✅ |
 | `listTournaments` `getTournament` | ✅ | ✅ | ✅ | ✅ |
-| `listCompletedMatches` (history) | — | ✅¹ | ✅ | ✅ |
+| `listCompletedMatches` `getMatchTape` (history) | — | ✅¹ | ✅ | ✅ |
 | `listArchiveMatches` `getArchiveMatch` `listArchivePlayers` `getArchiveCareer` `getH2H` (results archive · head-to-head) | — | ✅¹ | ✅ | ✅ |
 | `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
-| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket | — | — | — | ✅ |
+| `listRankings` (rank-ordered listing) | — | — | ✅ | ✅ |
+| `listHistoryPackages` `getHistoryPackage` (bulk downloads)² | — | — | ✅ | ✅ |
+| `listRankings` (per-player as-of records) | — | — | — | ✅ |
+| `getMatchStatistics` (in-play statistics) | — | — | — | ✅ |
+| `listRallyMatches` `getRallyMatch` `getMatchRally` `getChartingPlayer` `getChartingMatch` (shot-by-shot) | — | — | — | ✅ |
+| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket, `getWsToken` | — | — | — | ✅ |
 
 ¹ Also unlocked by any History plan, which works on top of a FREE key.
+² `kind: 'rally' | 'rankings'` packages and the `year` archive listing need ULTRA.
+
+## Quotas
+
+| Tier | Requests/min | Requests/day | Price |
+|---|--:|--:|--:|
+| FREE | 30 | 100 | $0 |
+| BASIC | 60 | 1,000 | $9.99/mo |
+| PRO | 300 | 10,000 | $29.99/mo |
+| ULTRA | 600 | 500,000 | $99.99/mo |
+
+At 100/day, a free key polling faster than every ~15 minutes will spend its
+allowance before the day ends — an always-on dashboard belongs on BASIC. Every
+response carries `X-RateLimit-Limit` / `-Remaining` / `-Reset` headers; a 429
+carries `Retry-After`, and the client retries those for you (per-minute 429s
+only — see below).
 
 Calling above your tier throws `UpgradeRequired`, which tells you which tier you need:
 
@@ -141,15 +181,19 @@ try {
 | `Unauthorized` | 401 — key missing, unknown, or disabled |
 | `UpgradeRequired` | 403 — valid key, tier too low (has `.requiredTier`) |
 | `NotFound` | 404 — no such resource, or no data yet |
-| `RateLimited` | 429 — has `.retryAfter` in seconds |
+| `RateLimited` | 429 — has `.retryAfter` (seconds); a **daily** 429 also has `.resetsAt`, the absolute ISO instant the allowance returns |
+| `AbuseThrottled` | 429 `abuse_throttled` — a ~24h block for chronic over-cap use; has `.retryAtEpoch`. Fix the retry loop |
 | `ServerError` / `ServiceUnavailable` | 5xx |
 | `APIConnectionError` / `APITimeoutError` | never reached the API |
 
-All extend `LiveTennisAPIError`.
+All extend `LiveTennisAPIError` (`AbuseThrottled` extends `RateLimited`, so an
+existing `catch` keeps working).
 
-Requests retry on **429 and 5xx only**, honouring `Retry-After` with exponential
-backoff and jitter. Other 4xx are never retried — a bad key or an unentitled tier
-cannot start working, and retrying only burns rate limit.
+Requests retry on **per-minute 429 and 5xx only**, honouring `Retry-After` with
+exponential backoff and jitter. Other 4xx are never retried — a bad key or an
+unentitled tier cannot start working, and retrying only burns rate limit. Nor
+are the two 429s retrying cannot fix: a daily 429 (nothing lifts before
+`.resetsAt`) and `abuse_throttled` (the block that counting retries earned).
 
 ## The results archive (1968–2022) and head-to-head
 
@@ -181,6 +225,43 @@ Three things worth knowing before you lean on it:
   `err.body.candidates` — disambiguate and retry.
 - **`meetings[].winner` in an H2H is 1|2 of your request** (`p1`/`p2` as you
   passed them), not of the underlying match row.
+
+## The tape, statistics, rankings and shot-by-shot data
+
+Everything the 1.4.0 surface adds, in one place:
+
+```ts
+// The point-by-point tape for one match — works on a LIVE match too. BASIC.
+// sequence: 'clean' collapses corrections to one row per score state and is
+// the only sequence that carries point_winner. Check meta.coverage before
+// backtesting; tiebreaks holds per-set tiebreak final scores.
+const tape = await client.getMatchTape(18953, { sequence: 'clean' });
+
+// In-play statistics — aces, serve split, hold/break %, break points. ULTRA.
+// Two families: derived (from the tape) and measured (counted upstream).
+// Absent measured fields are omitted, never zero-filled.
+const stats = await client.getMatchStatistics(18953);
+
+// Point-in-time rankings. Listing mode (PRO): the full published table for
+// one system. Per-player mode (ULTRA): the record in force at as_of.
+// Rows carry previous_rank (ATP/WTA) for week-on-week movement.
+const table = await client.listRankings({ system: 'atp', limit: 100 });
+const asOf = await client.listRankings({ player: 925, as_of: '2026-07-01' });
+
+// Shot-by-shot rally construction (Match Charting Project corpus). ULTRA.
+// Its own id space, reaching back decades; getMatchRally() resolves OUR
+// match ids and 404s with errorCode 'not_charted' when nobody charted it.
+const charted = await client.listRallyMatches({ player: 'sampras' });
+const rally = await client.getRallyMatch(charted.data[0]!.rally_match_id!);
+
+// Career serve/return/clutch aggregate for one charted player. ULTRA.
+const profile = await client.getChartingPlayer('graf', { gender: 'women' });
+
+// Bulk packages — whole months of tape as JSONL/CSV. PRO+.
+// kind: 'rally' | 'rankings' and the ?year= listing need ULTRA.
+const packages = await client.listHistoryPackages();
+const manifest = await client.getHistoryPackage('2026-07');
+```
 
 ## Pagination
 
@@ -224,6 +305,14 @@ import { gamesForSet, formatScore } from 'livetennisapi';
 gamesForSet(score, 0);   // [6, 4]
 formatScore(score);      // '6-4 3-6 2-1 (40-30)'
 ```
+
+## Authentication
+
+Keys are `twjp_…` strings. The client sends `Authorization: Bearer <key>` by
+default — the preferred form — or `X-API-Key` with `authHeader: 'x-api-key'`.
+The WebSocket feed authenticates with `?token=<key>` on the handshake, because
+the browser WebSocket API cannot set headers; over TLS it is encrypted in
+transit. Only `health()` needs no key.
 
 ## Configuration
 
@@ -269,8 +358,11 @@ Everything in the Live Tennis API developer surface:
 
 - **API reference** — <https://docs.livetennisapi.com> ([plain-HTML version](https://docs.livetennisapi.com/reference.html), no JavaScript required)
 - **OpenAPI 3.1 specification** — [livetennisapi/openapi](https://github.com/livetennisapi/openapi)
+- **Get a free API key** — <https://livetennisapi.com/subscribe/free>
 - **Products** — <https://livetennisapi.com/products>
 - **Website and plans** — <https://livetennisapi.com>
+- **Discord** — <https://discord.gg/f8WUZHgDm6>
+- **GitHub org** — <https://github.com/livetennisapi>
 
 ## Affiliate program
 
