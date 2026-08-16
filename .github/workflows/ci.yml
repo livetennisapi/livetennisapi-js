@@ -47,7 +47,7 @@ jobs:
           [ "$SRC" = "$PKG" ]
 
       # Contract tests need a live key and are excluded here.
-      - run: npx vitest run test/client.test.ts
+      - run: npx vitest run test/client.test.ts test/ws.test.ts test/push.test.ts
 
   node18-compat:
     name: runs on node 18 (the floor in package.json engines)

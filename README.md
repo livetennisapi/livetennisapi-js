@@ -65,6 +65,14 @@ $ npx livetennisapi watch --match 18953
 
 ## Live score feed (ULTRA)
 
+Two streamers, same score data, different transports:
+
+- **`LiveScoreStream`** — the native `/ws` feed. The quickest start, and the only
+  one carrying the opt-in break-point signal frames.
+- **`PushStream`** — the high-fan-out push feed, **recommended for continuous /
+  production streaming**: no shared connection ceiling, built for scale. Score
+  frames only today.
+
 ```ts
 import { LiveScoreStream } from 'livetennisapi';
 
@@ -118,19 +126,53 @@ inside `.score`, just like the REST score reads (the whole feed is ULTRA). A
 `null` there means the model had no output for that state, not a missing
 feature.
 
-### Push feed (Centrifugo)
+### Push streamer (`PushStream`) — for continuous / production streaming
 
-For high fan-out there is a second transport: `getWsToken()` (ULTRA) mints a
-short-lived token for a Centrifugo push endpoint. Connect any
-Centrifugo-protocol client (e.g. [`centrifuge-js`](https://www.npmjs.com/package/centrifuge))
-to `ws_url` and subscribe to `match:{id}` for one match or `slate:all` for
-every live score frame — the exact channel names come back in `channels`:
+The second transport rides a high-fan-out push endpoint (Centrifugo) with no
+shared connection ceiling — prefer it for anything long-running. The tiny
+protocol subset is built into this package, so **no extra dependency** and the
+same ergonomics as the native streamer:
+
+```ts
+import { PushStream } from 'livetennisapi';
+
+const stream = new PushStream({ apiKey: 'twjp_…' });          // every live match
+// …or follow specific matches: new PushStream({ apiKey, matches: [18953] })
+
+for await (const update of stream) {
+  if (update.type === 'score') console.log(update.match_id, update.score?.sets);
+}
+```
+
+Score frames are byte-identical to the native feed's — payload nested under
+`.score`, `win_probability_p1` and `danger` inside it. Frames are
+complete-state and best-effort: a missed frame self-corrects on the next one,
+so there is nothing to replay. The stream mints a short-lived token via
+`getWsToken()` before every connection (a fresh one on every reconnect),
+reconnects with exponential backoff, and re-subscribes — and, like the native
+streamer, throws the SDK's normal errors instead of retrying a bad key, an
+insufficient tier (`UpgradeRequired`, the feed is ULTRA) or a disabled feed.
+An invalid connect token (the server closes the socket with code 3500/3501,
+never a reply error) surfaces as `Unauthorized` — not an endless reconnect —
+and a silently-dead connection is torn down and re-established when the
+server's advertised ping cadence (~25s) goes quiet for ~2 intervals.
+
+**Honest scope:** the subscribed score channels carry `score` frames only
+today — the break-point signal frames (`break_point` / `break_point_result`)
+exist only on the native `LiveScoreStream`. Frames are dispatched by their
+`type`, so a new frame kind published on a subscribed channel arrives without
+a client update. New channel *families* do need naming: the point feed lives
+on its own channels (`point:match:{id}` / `point:slate`, granted by the mint
+to `points`-entitled keys), which `PushStream` subscribes only when you pass
+them via `channels: ['point:slate']`.
+
+Bringing your own Centrifugo-protocol client instead? Mint the raw token
+yourself:
 
 ```ts
 const { token, ws_url, channels } = await client.getWsToken();
 // channels.slate === 'slate:all', channels.match === 'match:{match_id}'
-// Frames are the same score objects the polling endpoints return,
-// win_probability_p1 and danger included. Mint a fresh token on reconnect.
+// Mint a fresh token on every reconnect — never reuse one.
 ```
 
 ## Tiers
@@ -148,7 +190,7 @@ const { token, ws_url, channels } = await client.getWsToken();
 | `listRankings` (per-player as-of records) | — | — | — | ✅ |
 | `getMatchStatistics` (in-play statistics) | — | — | — | ✅ |
 | `listRallyMatches` `getRallyMatch` `getMatchRally` `getChartingPlayer` `getChartingMatch` (shot-by-shot) | — | — | — | ✅ |
-| `getMatchAnalysis`, `win_probability_p1` / `danger`, WebSocket, `getWsToken` | — | — | — | ✅ |
+| `getMatchAnalysis`, `win_probability_p1` / `danger`, `LiveScoreStream` `PushStream` `getWsToken` (streaming) | — | — | — | ✅ |
 
 ¹ Also unlocked by any History plan, which works on top of a FREE key.
 ² `kind: 'rally' | 'rankings'` packages and the `year` archive listing need ULTRA.
@@ -316,9 +358,11 @@ formatScore(score);      // '6-4 3-6 2-1 (40-30)'
 
 Keys are `twjp_…` strings. The client sends `Authorization: Bearer <key>` by
 default — the preferred form — or `X-API-Key` with `authHeader: 'x-api-key'`.
-The WebSocket feed authenticates with `?token=<key>` on the handshake, because
-the browser WebSocket API cannot set headers; over TLS it is encrypted in
-transit. Only `health()` needs no key.
+The native WebSocket feed authenticates with `?token=<key>` on the handshake,
+because the browser WebSocket API cannot set headers; over TLS it is encrypted
+in transit. The push feed (`PushStream`) never puts the key on the socket at
+all — it authenticates with a short-lived token minted over REST. Only
+`health()` needs no key.
 
 ## Configuration
 

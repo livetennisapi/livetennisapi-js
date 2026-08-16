@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LiveScoreStream } from '../src/index.js';
 
@@ -7,13 +7,21 @@ import { LiveScoreStream } from '../src/index.js';
  * replays the given frames. Returns the raw strings the client sent, so a test
  * can assert exactly what the subscribe frame looked like.
  */
-function installMockWebSocket(opts: { ack?: unknown; frames?: unknown[] } = {}) {
+function installMockWebSocket(
+  opts: {
+    ack?: unknown;
+    frames?: unknown[];
+    /** Keep emitting a `ping` heartbeat frame on this cadence (ms). */
+    repingEveryMs?: number;
+  } = {},
+) {
   const sent: string[] = [];
   const ack = opts.ack ?? { type: 'subscribed', topics: ['live-scores'] };
   const frames = opts.frames ?? [];
 
   class MockWebSocket {
     private handlers: Record<string, ((event: unknown) => void)[]> = {};
+    private pinger: ReturnType<typeof setInterval> | null = null;
 
     constructor(public url: string) {
       setTimeout(() => this.emit('open', {}), 0);
@@ -33,10 +41,19 @@ function installMockWebSocket(opts: { ack?: unknown; frames?: unknown[] } = {}) 
         this.emit('message', { data: JSON.stringify(ack) });
         for (const frame of frames) this.emit('message', { data: JSON.stringify(frame) });
       }, 0);
+      if (opts.repingEveryMs && !this.pinger) {
+        this.pinger = setInterval(
+          () => this.emit('message', { data: JSON.stringify({ type: 'ping' }) }),
+          opts.repingEveryMs,
+        );
+      }
     }
 
     close(): void {
-      /* nothing to tear down */
+      if (this.pinger) {
+        clearInterval(this.pinger);
+        this.pinger = null;
+      }
     }
   }
 
@@ -183,5 +200,56 @@ describe('LiveScoreStream frame dispatch', () => {
     const stream = new LiveScoreStream({ apiKey: 'twjp_test', signals: ['break_point'] });
     const got = await collect(stream, 4);
     expect(got.map((f) => f.type)).toEqual(['score', 'break_point', 'break_point_result', 'score']);
+  });
+});
+
+describe('LiveScoreStream dead-connection watchdog', () => {
+  let originalWebSocket: unknown;
+
+  beforeEach(() => {
+    originalWebSocket = (globalThis as unknown as { WebSocket: unknown }).WebSocket;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = originalWebSocket;
+  });
+
+  it('tears down a silently-dead connection instead of hanging forever', async () => {
+    // The mock acks the subscribe and delivers one frame, then goes totally
+    // silent — no close, no error, exactly like a half-open socket. Total
+    // silence past ~3 heartbeat intervals (the feed pings every ~15s) must
+    // surface as a connection error, not an eternal hang.
+    vi.useFakeTimers();
+    installMockWebSocket({ frames: [{ type: 'score', match_id: 1 }] });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', autoReconnect: false });
+    const iter = stream.listen();
+
+    const first = iter.next();
+    await vi.advanceTimersByTimeAsync(10); // flush open + ack + the one frame
+    expect(((await first).value as Record<string, unknown>).match_id).toBe(1);
+
+    const second = iter.next();
+    const advancing = vi.advanceTimersByTimeAsync(46_000); // > 3 × 15s heartbeat
+    await expect(second).rejects.toThrow(/silent/);
+    await advancing;
+  });
+
+  it('heartbeats reset the watchdog — a pinging but frame-less feed stays connected', async () => {
+    vi.useFakeTimers();
+    const { sent } = installMockWebSocket({
+      frames: [{ type: 'ping' }],
+      repingEveryMs: 10_000,
+    });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', autoReconnect: false });
+    const iter = stream.listen();
+
+    const next = iter.next();
+    await vi.advanceTimersByTimeAsync(120_000); // far past the 45s silence limit
+    stream.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await next; // clean end via close(), NOT a silence error
+    expect(result.done).toBe(true);
+    expect(sent.length).toBeGreaterThan(0);
   });
 });
