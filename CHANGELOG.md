@@ -3,6 +3,50 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-08-16
+
+### Added
+- **`PushStream` — a built-in client for the high-fan-out push feed.** The
+  second streaming transport (Centrifugo-backed, ULTRA) no longer needs
+  `centrifuge-js`: the tiny protocol subset is implemented directly over the
+  same WebSocket resolution the native streamer uses, keeping the package at
+  zero runtime dependencies. Same ergonomics as `LiveScoreStream` — an async
+  iterator of frames, `matches: [id, …]` for specific matches or the whole
+  live slate by default, `close()`, auto-reconnect with exponential backoff —
+  plus what the push protocol demands: a FRESH token minted via `getWsToken()`
+  before every connection (never reused across reconnects), the server's
+  empty-object ping answered promptly, newline-batched messages split before
+  parsing, subscribe error replies raised, and publications dispatched by
+  their `type` so a new frame kind published on a subscribed channel arrives
+  without a client update (new channel *families* — the point feed's
+  `point:*` channels, say — must be named via the `channels` option). Auth
+  and tier refusals from the mint surface as the SDK's normal errors
+  (`UpgradeRequired` with `requiredTier: 'ULTRA'`, `Unauthorized`,
+  `ServiceUnavailable`) and are never retried; an invalid connect token —
+  which the server reports by CLOSING the socket with code 3500/3501, never
+  as a reply error — surfaces as `Unauthorized` instead of reconnect-looping.
+  A dead-connection watchdog tears down and re-establishes a connection that
+  goes completely silent for ~2× the server's advertised ping cadence, so a
+  half-open socket can never hang the stream forever. Invalid `matches` ids
+  (`NaN`, say) throw a `TypeError` up front rather than silently widening the
+  subscription to the whole slate. Today the subscribed score channels carry
+  `score` frames only — the break-point signal frames remain native-only.
+- `PushFrame` — the publication type the push streamer yields.
+- `PushStreamOptions.channels` — extra channel names subscribed verbatim, the
+  escape hatch for channel families newer than this SDK (mirrors the Python
+  SDK's `channels=` option); `WsToken.channels` now also types the optional
+  `point_match` / `point_slate` grants.
+
+### Changed
+- README and doc-comments that pointed push-feed users at `centrifuge-js` now
+  point at the built-in `PushStream`; minting the raw token remains supported
+  for bring-your-own clients. The push streamer is recommended for
+  continuous/production streaming, the native streamer for quick starts.
+- `LiveScoreStream` gains the same dead-connection watchdog as `PushStream`:
+  total silence past ~3 heartbeat intervals (~45s; the native feed pings every
+  ~15s) tears the socket down and reconnects instead of hanging forever on a
+  half-open connection.
+
 ## [1.4.2] — 2026-08-16
 
 ### Added

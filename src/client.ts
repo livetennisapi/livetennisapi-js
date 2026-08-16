@@ -678,14 +678,17 @@ export class LiveTennisAPI {
    * Mint a short-lived connection token for the high-fan-out push feed
    * (Centrifugo). **ULTRA.**
    *
-   * Connect a Centrifugo-protocol client (e.g. `centrifuge-js`) to
-   * `ws_url` with `token`, then subscribe to `match:{id}` for one match or
+   * You normally never call this yourself: `PushStream` (built into this
+   * package) mints, connects, subscribes and re-mints for you. Reach for the
+   * raw token only to connect your own Centrifugo-protocol client to
+   * `ws_url` with `token`, subscribing to `match:{id}` for one match or
    * `slate:all` for every live score frame — the exact channel names are in
    * `channels`. Frames are the same score objects the polling endpoints
-   * return, model fields included. Mint a fresh token on reconnect.
+   * return, model fields included. Mint a fresh token on every reconnect,
+   * never reuse one across connections.
    *
-   * This is a separate transport from {@link LiveScoreStream} (the native
-   * `/ws` feed): same data, built for high fan-out.
+   * This is a separate transport from `LiveScoreStream` (the native `/ws`
+   * feed): same data, built for high fan-out.
    */
   getWsToken(): Promise<WsToken> {
     return this.request('/ws-token');

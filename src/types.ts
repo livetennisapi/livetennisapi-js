@@ -261,6 +261,24 @@ export interface BreakPointResult extends Extensible {
  */
 export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult;
 
+/**
+ * A publication from the push feed (`PushStream`).
+ *
+ * Today the subscribed score channels carry `score` frames only — the exact
+ * {@link ScoreUpdate} shape the native feed sends, payload nested under
+ * `.score` with the model fields inside it. Frames are dispatched by their
+ * `type`, so a new frame kind published on a SUBSCRIBED channel arrives with
+ * its own `type` value: narrow on `type` and ignore kinds you do not handle.
+ * New channel families are not automatic — the point feed lives on its own
+ * `point:*` channels, which `PushStream` subscribes only when they are named
+ * via its `channels` option.
+ */
+export interface PushFrame extends Extensible {
+  type?: string;
+  match_id?: number;
+  score?: Score;
+}
+
 export type MatchStatus = 'live' | 'upcoming' | 'completed';
 
 /**
@@ -956,12 +974,15 @@ export interface HistoryPackage extends Extensible {
  * A minted connection token for the high-fan-out push feed (Centrifugo).
  * **ULTRA.**
  *
- * Connect a Centrifugo-protocol client (e.g. `centrifuge-js`) to `ws_url`
- * with `token`, then subscribe to a channel from `channels`:
- * `match:{match_id}` for one match's score frames, `slate:all` for every
- * live score frame. Frames are the same score objects the polling endpoints
- * return — including `win_probability_p1` and `danger`. The token is
- * short-lived: mint a fresh one on reconnect.
+ * You normally never touch this directly: `PushStream` (built into this
+ * package — no extra dependency) mints, connects, subscribes and re-mints for
+ * you. Reach for the raw token only to connect a Centrifugo-protocol client
+ * of your own: connect to `ws_url` with `token`, then subscribe to a channel
+ * from `channels` — `match:{match_id}` for one match's score frames,
+ * `slate:all` for every live score frame. Frames are the same score objects
+ * the polling endpoints return — including `win_probability_p1` and `danger`.
+ * The token is short-lived: mint a fresh one on every reconnect, never reuse
+ * one across connections.
  */
 export interface WsToken extends Extensible {
   token?: string;
@@ -969,8 +990,19 @@ export interface WsToken extends Extensible {
   expires_in?: number;
   /** `wss://api.livetennisapi.com/connection/websocket` */
   ws_url?: string;
-  /** Channel vocabulary, e.g. `{ match: 'match:{id}', slate: 'slate:all' }`. */
-  channels?: { match?: string; slate?: string } & Extensible;
+  /**
+   * Channel vocabulary, e.g. `{ match: 'match:{id}', slate: 'slate:all' }`.
+   * `points`-entitled keys may additionally be granted the point-feed
+   * channels (`point_match` / `point_slate`) when the server has the point
+   * feed enabled — `PushStream` does not subscribe those on its own; pass
+   * the resolved names via its `channels` option (or use your own client).
+   */
+  channels?: {
+    match?: string;
+    slate?: string;
+    point_match?: string;
+    point_slate?: string;
+  } & Extensible;
 }
 
 /**

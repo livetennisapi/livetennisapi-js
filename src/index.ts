@@ -22,6 +22,9 @@ export type { ClientOptions, ListParams } from './client.js';
 export { LiveScoreStream } from './ws.js';
 export type { StreamOptions } from './ws.js';
 
+export { PushStream } from './push.js';
+export type { PushStreamOptions } from './push.js';
+
 export {
   LiveTennisAPIError,
   APIStatusError,
@@ -68,6 +71,7 @@ export type {
   PackageFile,
   PackageKind,
   PointSource,
+  PushFrame,
   RallyMatch,
   RallyMatchDetail,
   RallyPoint,

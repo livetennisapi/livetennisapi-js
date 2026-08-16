@@ -12,7 +12,9 @@
  *
  * The feed pushes a `score` frame whenever a subscribed match changes, plus a
  * `ping` heartbeat roughly every 15s. Heartbeats are consumed internally and
- * never yielded.
+ * never yielded — and they double as the liveness signal: total silence for
+ * ~3 heartbeat intervals means a silently-dead (half-open) socket, which is
+ * torn down and reconnected instead of hanging the stream forever.
  *
  * Score frames NEST their payload under `.score` — the same allowlist object
  * the REST score reads return, model fields (`win_probability_p1`, `danger`)
@@ -48,6 +50,16 @@ import type { BreakPoint, BreakPointResult, ScoreUpdate, StreamFrame } from './t
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
 
 /**
+ * The feed heartbeats a `ping` frame roughly every 15s. Total silence — no
+ * frame of any kind — for about three intervals means the socket is half-open
+ * (dead without ever firing a 'close' or 'error' event: NAT reset, network
+ * path loss without a FIN), so the stream tears it down and lets the
+ * reconnect machinery take over instead of hanging forever.
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const SILENCE_LIMIT_MS = 3 * HEARTBEAT_INTERVAL_MS;
+
+/**
  * How long a connection must stay up before it counts as healthy enough to
  * reset the backoff. Resetting on a successful subscribe alone lets a flapping
  * server (accept -> ack -> drop) pin the delay at step one forever, so the
@@ -78,14 +90,16 @@ export interface StreamOptions {
   timeout?: number;
 }
 
-type AnySocket = {
+/** Shared with the push streamer (`push.ts`); not part of the public API. */
+export type AnySocket = {
   send(data: string): void;
   close(): void;
   addEventListener?(type: string, listener: (event: any) => void): void;
   on?(type: string, listener: (...args: any[]) => void): void;
 };
 
-async function resolveWebSocket(): Promise<any> {
+/** Shared with the push streamer (`push.ts`); not part of the public API. */
+export async function resolveWebSocket(): Promise<any> {
   if (typeof (globalThis as any).WebSocket === 'function') return (globalThis as any).WebSocket;
   try {
     // Indirected through a variable so TypeScript does not try to resolve an
@@ -196,6 +210,7 @@ export class LiveScoreStream {
       const queue: Record<string, unknown>[] = [];
       let notify: (() => void) | null = null;
       let finished: Error | null | undefined;
+      let lastSeenAt = Date.now();
 
       const socket: AnySocket = new WebSocketImpl(this.url);
       this.socket = socket;
@@ -212,6 +227,7 @@ export class LiveScoreStream {
       };
 
       on('message', (event: any) => {
+        lastSeenAt = Date.now(); // any traffic — the ping heartbeat included — proves liveness
         const frame = LiveScoreStream.parse(event?.data ?? event);
         if (frame) queue.push(frame);
         wake();
@@ -284,6 +300,15 @@ export class LiveScoreStream {
           }
           if (this.closed) return;
           if (finished !== undefined) throw finished ?? new APIConnectionError('feed closed');
+          // Dead-connection watchdog: a half-open socket fires no 'close' or
+          // 'error' event, but the server heartbeats every ~15s, so total
+          // silence past ~3 intervals means the connection is dead. Throwing
+          // hands control to the reconnect machinery.
+          if (Date.now() - lastSeenAt > SILENCE_LIMIT_MS) {
+            throw new APIConnectionError(
+              'live feed went silent (no heartbeat) — connection presumed dead',
+            );
+          }
           await new Promise<void>((resolve) => {
             notify = resolve;
             setTimeout(resolve, 250);
