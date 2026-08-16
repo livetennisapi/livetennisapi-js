@@ -9,6 +9,7 @@
 Real-time tennis scores, players, rankings, match-winner market prices and model
 win-probability — for ATP, WTA, Challenger, ITF and juniors, over REST and WebSocket.
 
+[![CI](https://github.com/livetennisapi/livetennisapi-js/actions/workflows/ci.yml/badge.svg)](https://github.com/livetennisapi/livetennisapi-js/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
 [![types](https://img.shields.io/npm/types/livetennisapi.svg)](https://www.npmjs.com/package/livetennisapi)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
