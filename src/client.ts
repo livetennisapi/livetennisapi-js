@@ -662,7 +662,8 @@ export class LiveTennisAPI {
 
   /**
    * One bulk package's manifest — file set, counts, sha256. **PRO** (or a
-   * package subscription); `kind: 'rally' | 'rankings'` needs ULTRA.
+   * package subscription); `kind: 'rally' | 'rankings'` needs ULTRA;
+   * `kind: 'archive'` rides the tape entitlement and takes a bare-year period.
    *
    * `period` is `YYYY-MM` (rally packages are keyed by year). The manifest
    * names the downloadable files; fetch the file itself with

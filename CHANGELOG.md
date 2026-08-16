@@ -3,6 +3,16 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] — 2026-08-16
+
+### Added
+- `PackageKind` gains `'archive'` — the 1968–2022 results archive as yearly
+  bulk packages (bare-year period, same entitlement as the tape packages).
+  The type previously rejected a kind the API accepts.
+
+### Changed
+- Dev-only: esbuild 0.28.2 (clears a low-severity advisory).
+
 ## [1.4.1] — 2026-08-07
 
 ### Fixed

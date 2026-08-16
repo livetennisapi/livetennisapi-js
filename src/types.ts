@@ -917,9 +917,10 @@ export interface ChartingMatch extends Extensible {
  * Package family of `/history/packages`. `tape` (the default) = point-by-point
  * match tapes (PRO+ or a package subscription); `rally` = the charted rally
  * corpus, keyed by YEAR not month (ULTRA); `rankings` = as-of ranking records
- * (ULTRA).
+ * (ULTRA); `archive` = the 1968-2022 results archive, keyed by YEAR, same
+ * entitlement as the tape packages (not ULTRA).
  */
-export type PackageKind = 'tape' | 'rally' | 'rankings';
+export type PackageKind = 'tape' | 'rally' | 'rankings' | 'archive';
 
 /** One downloadable file of a bulk package. */
 export interface PackageFile extends Extensible {
