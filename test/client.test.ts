@@ -443,6 +443,8 @@ describe('requests', () => {
     expect(calls[1]!.url).toContain('year=2025');
     await client.getHistoryPackage('2026-07', { kind: 'rally' });
     expect(calls[2]!.url).toContain(`${BASE}/history/packages/2026-07?kind=rally`);
+    await client.getHistoryPackage('1999', { kind: 'archive' });
+    expect(calls[3]!.url).toContain(`${BASE}/history/packages/1999?kind=archive`);
   });
 
   it('builds the ws-token path', async () => {
