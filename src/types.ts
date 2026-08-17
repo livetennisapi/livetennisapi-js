@@ -183,6 +183,14 @@ export interface Match extends Extensible {
    */
   event_status?: string | null;
   is_doubles?: boolean;
+  /**
+   * `'singles'` | `'doubles'` | null — three-valued on purpose. Null means
+   * the draw is UNKNOWN (team ties and team exhibitions never state which
+   * discipline a rubber was), never a guess — and a null-draw match matches
+   * NEITHER value of the `draw` filter. `is_doubles` stays but is lossy (it
+   * cannot say "unknown"); branch on this field.
+   */
+  draw?: Draw | null;
   scheduled_time?: string | null;
   players?: { p1?: Player; p2?: Player };
   score?: Score | null;
@@ -365,6 +373,15 @@ export type MatchStatus = 'live' | 'upcoming' | 'completed';
  * is a 400, never a silent pass-through.
  */
 export type Tour = 'atp' | 'wta' | 'challenger' | 'itf' | 'juniors';
+
+/**
+ * Draw filter accepted by `/matches`, `/history/matches`, `/tournaments` and
+ * `/fixtures`. The FIELD (`Match.draw`) is three-valued (`Draw | null`) — a
+ * null-draw row (the draw is unknown: team ties, team exhibitions) matches
+ * NEITHER filter value, so `singles` plus `doubles` is not everything. An
+ * unrecognised value is a 400 `bad_draw` with the allowed list in the body.
+ */
+export type Draw = 'singles' | 'doubles';
 
 /**
  * Normalized round vocabulary, shared by `Match.round_code`,
@@ -1049,6 +1066,47 @@ export interface HistoryPackage extends Extensible {
   built_at?: string | null;
   /** Present only on non-tape packages, so the shape a tape client already parses is unchanged. */
   kind?: PackageKind;
+}
+
+/**
+ * One bucket of the `/history/coverage` table — the completed archive sliced
+ * by `tour_draw` (`atp_singles`, `itf_doubles`, …).
+ *
+ * The two completeness counts differ ON PURPOSE: `point_complete` says a
+ * complete point-by-point tape is AVAILABLE for that many matches;
+ * `complete_on_default_read` (at most `point_complete`) says how many of them
+ * a default read serves complete.
+ */
+export interface CoverageBucket extends Extensible {
+  /** Completed matches in this bucket. */
+  completed?: number;
+  /** How many carry any tape at all. */
+  any_tape?: number;
+  /** How many have a COMPLETE point-by-point tape available. */
+  point_complete?: number;
+  /** How many a default read serves complete — at most `point_complete`. */
+  complete_on_default_read?: number;
+  /** `point_complete / completed`. */
+  share?: number;
+}
+
+/**
+ * The measured point-completeness table for the whole completed archive —
+ * one object, from `getHistoryCoverage()`. **BASIC** (or any History plan).
+ *
+ * The numbers are a BUILT ARTIFACT, not a live count: `as_of` stamps the
+ * build (ISO-8601) and `method` says how they were measured. While the
+ * artifact is not built the endpoint answers 503 `coverage_unavailable` —
+ * surfaced as `ServiceUnavailable` with the code on `err.errorCode`, never
+ * as an empty object.
+ */
+export interface CoveragePage extends Extensible {
+  as_of?: string | null;
+  method?: string | null;
+  /** Keyed by `tour_draw` strings (`atp_singles`, `itf_doubles`, …). */
+  buckets?: Record<string, CoverageBucket>;
+  /** The same counts summed over every bucket. */
+  totals?: CoverageBucket;
 }
 
 /**
