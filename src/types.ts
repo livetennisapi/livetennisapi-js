@@ -256,10 +256,11 @@ export interface BreakPointResult extends Extensible {
 }
 
 /**
- * Any frame the live stream may yield. `score` frames arrive always; the break
- * frames only when their signal was requested. Narrow on the `type` field.
+ * Any frame the live stream may yield. `score` frames arrive always; the
+ * break and point frames only when their signal was requested
+ * (`signals: ['break_point']` / `['points']`). Narrow on the `type` field.
  */
-export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult;
+export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult | PointUpdate;
 
 /**
  * A publication from the push feed (`PushStream`).
