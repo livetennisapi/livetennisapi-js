@@ -21,11 +21,19 @@
  * `danger`) included. Today the subscribed score channels carry score frames
  * only — frames are dispatched by their `type`, so a new frame kind published
  * on a SUBSCRIBED channel arrives without a client update. New channel
- * FAMILIES are different: the point feed lives on its own channels
- * (`point:match:{id}` / `point:slate`) which this stream does not subscribe
- * by default — pass their names via the `channels` option to receive them.
- * Frames are complete-state and best-effort: a missed frame self-corrects on
- * the next one, so there is no client-side catch-up to do.
+ * FAMILIES are different: they must be subscribed by name. The point feed
+ * (its own `point:match:{id}` / `point:slate` channels) is built in — pass
+ * `points: true` and the stream subscribes it from the mint's own advertised
+ * vocabulary, refusing loudly (`ServiceUnavailable`) when the mint does not
+ * grant it; the `channels` option remains the verbatim escape hatch for
+ * families newer than this SDK.
+ *
+ * Score frames are complete-state and best-effort: a missed frame
+ * self-corrects on the next one, so there is no catch-up to do. POINT frames
+ * are events — a missed frame is a missed point — so with `points: true` the
+ * stream keeps a per-match `seq` cursor and (by default, `pointsResume`)
+ * catches up over REST on every (re)connect, dedups replays, and back-fills
+ * mid-stream gaps before yielding the frame that revealed them.
  *
  * Reconnects automatically with exponential backoff, minting a FRESH token on
  * every attempt (tokens expire with the connection and are never reused), then
@@ -50,7 +58,7 @@ import {
   Unauthorized,
   UpgradeRequired,
 } from './errors.js';
-import type { PushFrame, WsToken } from './types.js';
+import type { PointUpdate, PushFrame, WsToken } from './types.js';
 import { resolveWebSocket, type AnySocket } from './ws.js';
 
 /** How long the connect + subscribe handshake may take before we give up. */
@@ -130,13 +138,53 @@ export interface PushStreamOptions {
   matches?: number[];
   /**
    * Extra channel names to subscribe, verbatim — the escape hatch for channel
-   * families this SDK does not subscribe on its own (the point feed's
-   * `point:slate` / `point:match:{id}` channels the mint grants to
-   * `points`-entitled keys, say). Subscribed alongside the match channels, or
+   * families newer than this SDK. Subscribed alongside the match channels, or
    * alone; the `slate:all` fallback applies only when neither option names a
-   * channel.
+   * channel. (For the point feed, prefer `points: true`, which resolves the
+   * channel names from the mint's own vocabulary and adds resume/dedup.)
    */
   channels?: string[];
+  /**
+   * Also subscribe the live point feed: `point:match:{id}` per requested
+   * match, or the whole point slate when no `matches` were named — resolved
+   * from the `/ws-token` mint's OWN advertised vocabulary, never guessed.
+   * When the mint does not advertise the point channels the stream throws
+   * `ServiceUnavailable` instead of subscribing blind: an unadvertised
+   * vocabulary is the server's honest refusal (the point gate is off, or the
+   * plan does not include points), not something a retry can fix.
+   *
+   * Point frames arrive as {@link PointUpdate} — payload nested under
+   * `.point`, with the per-match monotonic gapless `seq`.
+   */
+  points?: boolean;
+  /**
+   * With `points: true` (default **true**): repair the point feed's only
+   * structural weakness — unlike score frames, point frames are events, so a
+   * missed frame is a missed point. The stream keeps a per-match last-`seq`
+   * cursor; on every (re)connect it catches up over REST
+   * (`getMatchPoints({ after_seq })`) and yields the fetched points BEFORE
+   * any live frame, drops duplicates (`seq` at or below the cursor), and
+   * back-fills a mid-stream gap (`seq` jumping past `cursor + 1`) over REST
+   * before yielding the frame that revealed it. The first frame of a match
+   * the stream has not seen before triggers a back-fill from the start of
+   * the match (`seq` 1), and is not reported as a gap.
+   *
+   * **Slate caveat:** cursors exist per MATCH, so on the point slate a
+   * reconnect can only catch up matches the stream had already seen before
+   * the drop — a match that went live entirely inside the outage is caught
+   * up only when its first live frame arrives (the new-match back-fill
+   * above). Joining a busy slate mid-play therefore costs one REST
+   * back-fill per in-progress match; follow specific `matches` when that
+   * matters. Set `false` to take the raw frames with no REST traffic.
+   */
+  pointsResume?: boolean;
+  /**
+   * With `points: true` and resume on: called when a live point frame
+   * reveals a mid-stream gap — `expectedSeq` is `cursor + 1`, `gotSeq` the
+   * frame's `seq`. The gap is already being repaired over REST when this
+   * fires; the callback is observability, not a request to act.
+   */
+  onGap?: (matchId: number, expectedSeq: number, gotSeq: number) => void;
   autoReconnect?: boolean;
   /** 0 means retry forever. */
   maxReconnectAttempts?: number;
@@ -155,11 +203,20 @@ export class PushStream {
   readonly baseUrl: string;
   readonly matches: number[];
   readonly channels: string[];
+  readonly points: boolean;
+  readonly pointsResume: boolean;
   readonly autoReconnect: boolean;
   readonly maxReconnectAttempts: number;
   readonly timeout: number;
 
   private readonly client: LiveTennisAPI;
+  private readonly onGap?: (matchId: number, expectedSeq: number, gotSeq: number) => void;
+  /**
+   * Per-match last-seen `point.seq` — the resume/dedup state, deliberately an
+   * instance field so it SURVIVES reconnects: the whole job of the cursor is
+   * to say where the previous connection left off.
+   */
+  private readonly cursors = new Map<number, number>();
   private socket: AnySocket | null = null;
   private closed = false;
 
@@ -179,6 +236,9 @@ export class PushStream {
     }
     this.matches = [...matches];
     this.channels = (options.channels ?? []).filter(Boolean);
+    this.points = options.points ?? false;
+    this.pointsResume = this.points && (options.pointsResume ?? true);
+    this.onGap = options.onGap;
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
     this.timeout = options.timeout ?? 30_000;
@@ -225,9 +285,9 @@ export class PushStream {
   /**
    * The channels to subscribe, from the mint's own channel vocabulary: one
    * channel per requested match id, plus any extra `channels` names verbatim,
-   * or the whole live slate when neither was given. The server's templates win
-   * over the hardcoded fallbacks so a renamed channel family never strands
-   * this client.
+   * or the whole live slate when neither was given — plus, with
+   * `points: true`, the point channels. The server's templates win over the
+   * hardcoded fallbacks so a renamed channel family never strands this client.
    */
   private channelsFor(channels: WsToken['channels']): string[] {
     const names: string[] = [];
@@ -237,7 +297,86 @@ export class PushStream {
     }
     names.push(...this.channels);
     if (!names.length) names.push(typeof channels?.slate === 'string' ? channels.slate : 'slate:all');
+    if (this.points) names.push(...this.pointChannelsFor(channels));
     return names;
+  }
+
+  /**
+   * The point channels, resolved ONLY from the mint's advertised vocabulary —
+   * there is deliberately no hardcoded fallback here. A mint that does not
+   * advertise `point_match` / `point_slate` is the server's honest refusal:
+   * the point gate is off, or the plan does not include points. Subscribing a
+   * guessed name would turn that refusal into a silent empty feed, so refuse
+   * loudly instead — and fatally, because a fresh mint from the same key
+   * re-fails identically (this is not a retry case).
+   */
+  private pointChannelsFor(channels: WsToken['channels']): string[] {
+    const template = typeof channels?.point_match === 'string' ? channels.point_match : undefined;
+    const slate = typeof channels?.point_slate === 'string' ? channels.point_slate : undefined;
+    const wanted = this.matches.length ? template : slate;
+    if (!wanted) {
+      throw new ServiceUnavailable(
+        'points: true, but the ws-token mint did not advertise the point channels — ' +
+          'the point feed is not available to this key (the server has the point feed ' +
+          'disabled, or the plan does not include points)',
+        { status: 0 },
+      );
+    }
+    if (this.matches.length) {
+      return this.matches.map((id) => wanted.replace(/\{[^{}]*\}/, String(id)));
+    }
+    return [wanted];
+  }
+
+  /**
+   * Fetch committed points over REST and yield them as {@link PointUpdate}
+   * frames, advancing the match's cursor as it goes. `beforeSeq` bounds a
+   * gap fill: the frame that revealed the gap will yield itself, so nothing
+   * at or past its `seq` is yielded from REST.
+   */
+  private async *fetchPoints(
+    matchId: number,
+    beforeSeq?: number,
+  ): AsyncGenerator<PushFrame, void, unknown> {
+    let cursor = this.cursors.get(matchId) ?? 0;
+    for (;;) {
+      const page = await this.client.getMatchPoints(matchId, { after_seq: cursor });
+      for (const point of page.points ?? []) {
+        const seq = typeof point.seq === 'number' ? point.seq : undefined;
+        if (seq === undefined) continue;
+        if (seq <= (this.cursors.get(matchId) ?? 0)) continue; // already yielded
+        if (beforeSeq !== undefined && seq >= beforeSeq) continue; // the trigger frame yields itself
+        this.cursors.set(matchId, seq);
+        const frame: PointUpdate = {
+          type: 'point',
+          match_id: matchId,
+          point,
+          pbp_coverage: page.pbp_coverage,
+          quality: page.quality,
+        };
+        yield frame as PushFrame;
+      }
+      if (!page.has_more) return;
+      // The server's own cursor drives the walk; a cursor that fails to
+      // advance would refetch the same page forever.
+      if (typeof page.last_seq !== 'number' || page.last_seq <= cursor) return;
+      cursor = page.last_seq;
+      if (beforeSeq !== undefined && cursor >= beforeSeq - 1) return; // gap fully covered
+    }
+  }
+
+  /**
+   * The post-(re)connect catch-up: replay, over REST, every point committed
+   * past each known cursor — BEFORE any live frame from the new connection is
+   * processed, so the consumer sees points in `seq` order across the outage.
+   * Only matches with a cursor are caught up (see the slate caveat on
+   * `pointsResume`); a match first seen on the new connection back-fills when
+   * its first frame arrives.
+   */
+  private async *catchUp(): AsyncGenerator<PushFrame, void, unknown> {
+    for (const matchId of [...this.cursors.keys()]) {
+      yield* this.fetchPoints(matchId);
+    }
   }
 
   /**
@@ -280,9 +419,11 @@ export class PushStream {
   /**
    * Yield push-feed publications until the stream is closed.
    *
-   * Frames come as {@link PushFrame} — today always `score` frames, the exact
-   * `ScoreUpdate` shape the native feed sends. Narrow on `frame.type`
-   * and ignore kinds you do not handle.
+   * Frames come as {@link PushFrame} — `score` frames (the exact
+   * `ScoreUpdate` shape the native feed sends) and, with `points: true`,
+   * `point` frames ({@link PointUpdate}), including the REST-fetched ones the
+   * resume machinery replays after an outage. Narrow on `frame.type` and
+   * ignore kinds you do not handle.
    */
   async *listen(): AsyncGenerator<PushFrame, void, unknown> {
     const WebSocketImpl = await resolveWebSocket();
@@ -297,6 +438,9 @@ export class PushStream {
       let socket: AnySocket | null = null;
       let lastSeenAt = Date.now();
       let pingIntervalMs = DEFAULT_PING_INTERVAL_MS;
+      // Point-feed catch-up runs once per CONNECTION, right after the last
+      // subscribe ack — the cursors themselves live on the instance.
+      let caughtUp = !this.pointsResume;
 
       try {
         // A FRESH token for every attempt — the previous one died with its
@@ -395,6 +539,14 @@ export class PushStream {
                   nextId += 1;
                 }
               }
+              if (!pending.size && !caughtUp) {
+                // Every subscribe is acked: replay the points the outage
+                // swallowed BEFORE any live frame — live publications keep
+                // buffering in the queue while this awaits, and the dedup
+                // below drops whatever the catch-up already covered.
+                caughtUp = true;
+                yield* this.catchUp();
+              }
               continue;
             }
 
@@ -405,6 +557,27 @@ export class PushStream {
             const pub = push?.pub as Record<string, unknown> | undefined;
             const frame = pub?.data;
             if (frame && typeof frame === 'object' && typeof (frame as PushFrame).type === 'string') {
+              if (this.pointsResume && (frame as PushFrame).type === 'point') {
+                const update = frame as PointUpdate;
+                const matchId = typeof update.match_id === 'number' ? update.match_id : undefined;
+                const seq = typeof update.point?.seq === 'number' ? update.point.seq : undefined;
+                if (matchId !== undefined && seq !== undefined) {
+                  const known = this.cursors.has(matchId);
+                  const cursor = this.cursors.get(matchId) ?? 0;
+                  // seq is gapless per match, so the cursor decides everything:
+                  // at or below it is a duplicate (catch-up already yielded
+                  // it); past cursor+1 is a hole, repaired over REST BEFORE
+                  // the frame that revealed it. The opening back-fill of a
+                  // match seen for the first time is normal operation, not a
+                  // reportable gap.
+                  if (seq <= cursor) continue;
+                  if (seq > cursor + 1) {
+                    if (known) this.onGap?.(matchId, cursor + 1, seq);
+                    yield* this.fetchPoints(matchId, seq);
+                  }
+                  this.cursors.set(matchId, seq);
+                }
+              }
               yield frame as PushFrame;
             }
           }
