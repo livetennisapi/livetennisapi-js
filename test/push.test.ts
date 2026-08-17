@@ -679,11 +679,11 @@ describe('PushStream point feed', () => {
   });
 
   it('a 404 during catch-up prunes that match and moves on — one vanished match cannot wedge the stream', { timeout: 15_000 }, async () => {
-    // Cursors are never pruned in slate mode, so a long-running stream WILL
-    // hold cursors for matches that have aged out of the live window. Their
-    // 404 must drop the cursor and let the other matches catch up — not
-    // abort the connection into an eternal reconnect -> same-404 loop that
-    // never delivers a frame again.
+    // A long-running slate stream can hold cursors for matches that aged out
+    // of the live window before the idle eviction fires. Their 404 must drop
+    // the cursor and let the other matches catch up — not abort the
+    // connection into an eternal reconnect -> same-404 loop that never
+    // delivers a frame again.
     const { fetchImpl, calls } = installPointsFetch({
       page: (matchId, afterSeq) => (matchId === 4 ? null : tapeUpTo(2)(matchId, afterSeq)),
     });
@@ -700,6 +700,33 @@ describe('PushStream point feed', () => {
     ]);
     expect(calls.filter((url) => url.includes('/matches/4/points'))).toHaveLength(1);
     expect(calls.filter((url) => url.includes('/matches/5/points'))).toHaveLength(1);
+  });
+
+  it('evicts a cursor idle past the window before catch-up — stale matches cost no REST calls', async () => {
+    // The bound on the cursor set: a match silent for two hours is evicted
+    // at reconnect-catch-up time, so the fan-out stays proportional to
+    // matches actually in play. The recently-active match still catches up.
+    const { fetchImpl, calls } = installPointsFetch({ page: tapeUpTo(2) });
+    installMockPushServer({
+      framesByChannel: { 'point:slate': [] },
+      closeAfterFrames: false,
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', points: true, fetch: fetchImpl });
+    // Prime the resume state as a previous connection would have left it:
+    // match 4 last seen beyond the eviction window, match 5 fresh.
+    const state = stream as unknown as {
+      cursors: Map<number, number>;
+      cursorSeen: Map<number, number>;
+    };
+    state.cursors.set(4, 1);
+    state.cursorSeen.set(4, Date.now() - (2 * 60 * 60 * 1_000 + 1_000));
+    state.cursors.set(5, 1);
+    state.cursorSeen.set(5, Date.now());
+    const got = await collect(stream, 1); // the catch-up frame for match 5
+    expect(got.map((f) => [f.match_id, (f.point as Record<string, unknown>).seq])).toEqual([[5, 2]]);
+    expect(calls.filter((url) => url.includes('/matches/4/points'))).toHaveLength(0);
+    expect(calls.filter((url) => url.includes('/matches/5/points'))).toHaveLength(1);
+    expect(state.cursors.has(4)).toBe(false);
   });
 
   it('never subscribes one channel twice — points: true deduped against a legacy channels entry', async () => {
