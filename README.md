@@ -71,7 +71,8 @@ Two streamers, same score data, different transports:
   one carrying the opt-in break-point signal frames.
 - **`PushStream`** — the high-fan-out push feed, **recommended for continuous /
   production streaming**: no shared connection ceiling, built for scale. Score
-  frames only today.
+  frames — plus, with `points: true`, the live point feed with built-in REST
+  resume.
 
 ```ts
 import { LiveScoreStream } from 'livetennisapi';
@@ -126,6 +127,70 @@ inside `.score`, just like the REST score reads (the whole feed is ULTRA). A
 `null` there means the model had no output for that state, not a missing
 feature.
 
+### The live point feed (ULTRA, server-gated)
+
+One frame per committed point: `{ type: 'point', match_id, point, pbp_coverage,
+quality }` — the point nested under `.point`, exactly as score frames nest
+theirs under `.score`. Its spine is `point.seq`: per-match, monotonic and
+**gapless** (`1..N`), which makes it the dedup key and the resume cursor in one
+field. Unlike score frames, point frames are **not** complete-state — each one
+is a distinct event, so a missed frame is a missed point. The gapless `seq` is
+what lets you detect that, and what the SDK's resume machinery repairs.
+
+The feed is **server-gated on top of ULTRA**: points are served only where the
+server's point gate is on and the plan includes points. The REST endpoint
+answers `400 points_disabled` and the `/ws-token` mint simply does not
+advertise the point channels — both are the server's honest refusal, and this
+SDK surfaces them as such (`BadRequest` with `errorCode: 'points_disabled'`,
+`ServiceUnavailable` from `PushStream`) instead of retrying a closed door.
+
+Over REST — one page of committed points (at most 500), or the iterator that
+follows the server's own cursor across pages:
+
+```ts
+const page = await client.getMatchPoints(18953);               // PointsPage
+// resume exactly after a point you already hold:
+const delta = await client.getMatchPoints(18953, { after_seq: 120 });
+
+for await (const point of client.iterateMatchPoints(18953)) {  // LivePoint
+  console.log(point.seq, point.winner, point.score);
+}
+```
+
+On the native feed, opt in with `signals: ['points']` and narrow on
+`frame.type === 'point'`, alongside score (and break-point) frames.
+
+On the push feed, pass `points: true`: the stream subscribes the point
+channels from the mint's **own advertised vocabulary** (`point:match:{id}` per
+requested match, or the point slate), and adds what an event feed needs —
+`pointsResume` (default on) keeps a per-match `seq` cursor that survives
+reconnects, catches up over REST on every (re)connect (replayed points arrive
+before any live frame), drops duplicates, and repairs a mid-stream gap over
+REST *before* yielding the frame that revealed it (`onGap(matchId,
+expectedSeq, gotSeq)` observes the repair). Set `pointsResume: false` to take
+the raw frames with no REST traffic.
+
+```ts
+const stream = new PushStream({
+  apiKey: 'twjp_…',
+  matches: [18953],
+  points: true,
+  onGap: (id, expected, got) => console.warn(`gap on ${id}: ${expected}…${got - 1}`),
+});
+for await (const frame of stream) {
+  if (frame.type === 'point') console.log(frame.point?.seq, frame.point?.winner);
+}
+```
+
+**Slate caveat:** cursors exist per match, so on the point slate a reconnect
+catches up only matches the stream had already seen before the drop; a match
+that went live entirely inside the outage back-fills (from `seq` 1) when its
+first live frame arrives. Follow specific `matches` when that matters.
+
+Read the page honestly: `pbp_coverage: 'game'` rows are game-grain commits —
+the feed's floor where per-point data never existed upstream — and an absent
+`covers_from_start` means "not stated" (an older server), never "no".
+
 ### Push streamer (`PushStream`) — for continuous / production streaming
 
 The second transport rides a high-fan-out push endpoint (Centrifugo) with no
@@ -163,8 +228,10 @@ exist only on the native `LiveScoreStream`. Frames are dispatched by their
 `type`, so a new frame kind published on a subscribed channel arrives without
 a client update. New channel *families* do need naming: the point feed lives
 on its own channels (`point:match:{id}` / `point:slate`, granted by the mint
-to `points`-entitled keys), which `PushStream` subscribes only when you pass
-them via `channels: ['point:slate']`.
+to `points`-entitled keys) — pass `points: true` and the stream subscribes
+them from the mint's own vocabulary with resume built in (see the point-feed
+section above); the `channels: […]` option remains the verbatim escape hatch
+for families newer than this SDK.
 
 Bringing your own Centrifugo-protocol client instead? Mint the raw token
 yourself:
@@ -191,9 +258,13 @@ const { token, ws_url, channels } = await client.getWsToken();
 | `getMatchStatistics` (in-play statistics) | — | — | — | ✅ |
 | `listRallyMatches` `getRallyMatch` `getMatchRally` `getChartingPlayer` `getChartingMatch` (shot-by-shot) | — | — | — | ✅ |
 | `getMatchAnalysis`, `win_probability_p1` / `danger`, `LiveScoreStream` `PushStream` `getWsToken` (streaming) | — | — | — | ✅ |
+| `getMatchPoints` `iterateMatchPoints`, the `points` signal / option (live point feed) | — | — | — | ✅³ |
 
 ¹ Also unlocked by any History plan, which works on top of a FREE key.
 ² `kind: 'rally' | 'rankings'` packages and the `year` archive listing need ULTRA.
+³ Server-gated on top of ULTRA: served only where the point gate is on and the
+plan includes points — the refusal is `points_disabled` / an unadvertised
+point-channel vocabulary, and this SDK never retries it.
 
 ## Quotas
 
@@ -295,6 +366,12 @@ const stats = await client.getMatchStatistics(18953);
 // Rows carry previous_rank (ATP/WTA) for week-on-week movement.
 const table = await client.listRankings({ system: 'atp', limit: 100 });
 const asOf = await client.listRankings({ player: 925, as_of: '2026-07-01' });
+
+// Our surface-aware Elo rating rides the same endpoint as system: 'elo'.
+// It is NEVER implied — omitting `system` returns published rankings only —
+// and its leaderboard requires `tour` (ratings are computed per tour).
+// surface / archive_player / min_matches / activity_weeks shape the board.
+const elo = await client.listRankings({ system: 'elo', tour: 'atp', surface: 'clay' });
 
 // Shot-by-shot rally construction (Match Charting Project corpus). ULTRA.
 // Its own id space, reaching back decades; getMatchRally() resolves OUR
