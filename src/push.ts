@@ -93,6 +93,15 @@ const silenceLimitMs = (pingIntervalMs: number) =>
 const HEALTHY_UPTIME_MS = 60_000;
 
 /**
+ * How long a tracked match may go without a single frame before its resume
+ * cursor is evicted. Two hours comfortably exceeds any between-points interval
+ * in a live match; the only loss window is a match that was evicted, then
+ * resumed AND ended entirely inside a later disconnect — narrow enough to
+ * trade for a bounded cursor set (see `cursorSeen`).
+ */
+const CURSOR_IDLE_EVICT_MS = 2 * 60 * 60 * 1_000;
+
+/**
  * Centrifugo reply-error codes that reconnecting can never resolve. 101 is an
  * authentication failure — and the token was minted seconds ago, so retrying
  * re-fails identically. 103 means the token does not grant the channel, which
@@ -218,6 +227,16 @@ export class PushStream {
    * to say where the previous connection left off.
    */
   private readonly cursors = new Map<number, number>();
+  /**
+   * Per-match wall-clock of the last frame seen (live or REST-fetched).
+   * Cursors otherwise accumulate forever on a long-lived slate stream, and
+   * every reconnect then spends one metered REST call per match ever seen —
+   * matches that finished days ago included. A match silent past
+   * {@link CURSOR_IDLE_EVICT_MS} is dropped before reconnect catch-up; if it
+   * later resumes it is treated as newly seen, the same documented behaviour
+   * as any match first discovered mid-play.
+   */
+  private readonly cursorSeen = new Map<number, number>();
   private socket: AnySocket | null = null;
   private closed = false;
 
@@ -352,6 +371,7 @@ export class PushStream {
         if (seq <= (this.cursors.get(matchId) ?? 0)) continue; // already yielded
         if (beforeSeq !== undefined && seq >= beforeSeq) continue; // the trigger frame yields itself
         this.cursors.set(matchId, seq);
+        this.cursorSeen.set(matchId, Date.now());
         const frame: PointUpdate = {
           type: 'point',
           match_id: matchId,
@@ -379,6 +399,14 @@ export class PushStream {
    * its first frame arrives.
    */
   private async *catchUp(): AsyncGenerator<PushFrame, void, unknown> {
+    // Matches silent past the eviction window cost nothing at reconnect.
+    const now = Date.now();
+    for (const [matchId, seen] of [...this.cursorSeen]) {
+      if (now - seen > CURSOR_IDLE_EVICT_MS) {
+        this.cursors.delete(matchId);
+        this.cursorSeen.delete(matchId);
+      }
+    }
     for (const matchId of [...this.cursors.keys()]) {
       try {
         yield* this.fetchPoints(matchId);
@@ -392,6 +420,7 @@ export class PushStream {
         // frame is ever delivered. Everything else still propagates.
         if (!(err instanceof NotFound)) throw err;
         this.cursors.delete(matchId);
+        this.cursorSeen.delete(matchId);
       }
     }
   }
@@ -587,6 +616,7 @@ export class PushStream {
                   // the frame that revealed it. The opening back-fill of a
                   // match seen for the first time is normal operation, not a
                   // reportable gap.
+                  this.cursorSeen.set(matchId, Date.now());
                   if (seq <= cursor) continue;
                   if (seq > cursor + 1) {
                     if (known) this.onGap?.(matchId, cursor + 1, seq);
