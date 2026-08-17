@@ -3,6 +3,43 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-08-18
+
+### Added
+- **`draw` — singles vs doubles, three-valued and filterable.** `Match` gains
+  `draw?: 'singles' | 'doubles' | null` (the new `Draw` type) — and the null
+  is an answer, not a gap. Team ties and team exhibitions never state which
+  discipline a rubber was, so those matches carry a null draw rather than a
+  guess; the existing `is_doubles` stays untouched but is lossy (it cannot
+  say "unknown"), so branch on `draw`. The same word filters:
+  `listMatches()`, `listCompletedMatches()`, `listTournaments()` and
+  `listFixtures()` take `draw: 'singles' | 'doubles'`, passed through to the
+  server as given (the server owns validation — an invalid value is a 400
+  `bad_draw` with the allowed list in the body). A null-draw row matches
+  NEITHER filter value, so `singles` plus `doubles` is not everything.
+- **`getHistoryCoverage()` — the measured point-completeness table.** BASIC,
+  or any History plan. One object for the whole completed archive, typed as
+  `CoveragePage`: per-`tour_draw` bucket (`atp_singles`, `itf_doubles`, … —
+  each a `CoverageBucket`) how many completed matches we hold (`completed`),
+  how many carry any tape (`any_tape`), how many have a complete
+  point-by-point tape AVAILABLE (`point_complete`), how many a default read
+  serves complete (`complete_on_default_read`), and the `share` — plus
+  `totals` across every bucket. The two completeness counts differ on
+  purpose: a complete tape can exist for a match a default read does not
+  serve complete. The numbers are a built artifact (`as_of` stamps the
+  build, `method` how they were measured); while it is not built the
+  endpoint answers 503 `coverage_unavailable`, surfaced as
+  `ServiceUnavailable` with the code on `err.errorCode` — never an empty
+  object.
+- The per-row `tape` block on `/history/matches` rows also carries
+  `starts_at_love` and `computed_at` on servers that measure them — readable
+  today through the types' index signature. An absent field there means an
+  older server or "not measured", never "no".
+
+### Notes
+- **Fully backwards compatible.** Every addition is a new method, a new
+  optional parameter, a new optional field, or a new exported type.
+
 ## [1.6.0] — 2026-08-17
 
 ### Added
