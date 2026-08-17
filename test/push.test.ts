@@ -36,6 +36,83 @@ function installMintFetch(responses?: Array<{ status?: number; body?: unknown }>
 }
 
 /**
+ * A fetch stub for the POINT-feed tests: routes `/ws-token` to a mint whose
+ * vocabulary DOES advertise the point channels (unless `pointChannels: false`),
+ * and `/matches/{id}/points` to the given page builder. Records every URL so a
+ * test can assert exactly which REST catch-ups happened and with what cursor.
+ */
+function installPointsFetch(
+  opts: {
+    /** Advertise `point_match` / `point_slate` in the mint. Default true. */
+    pointChannels?: boolean;
+    /** Build the `/matches/{id}/points` response body. */
+    page?: (matchId: number, afterSeq: number) => unknown;
+  } = {},
+) {
+  const calls: string[] = [];
+  let mints = 0;
+  const fetchImpl = (async (url: unknown) => {
+    calls.push(String(url));
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith('/ws-token')) {
+      mints += 1;
+      const channels: Record<string, string> = { match: 'match:{match_id}', slate: 'slate:all' };
+      if (opts.pointChannels !== false) {
+        channels.point_match = 'point:match:{match_id}';
+        channels.point_slate = 'point:slate';
+      }
+      return new Response(
+        JSON.stringify({
+          token: `jwt-${mints}`,
+          expires_in: 3600,
+          ws_url: 'wss://push.example/connection/websocket',
+          channels,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    const match = parsed.pathname.match(/\/matches\/(\d+)\/points$/);
+    if (match && opts.page) {
+      const body = opts.page(Number(match[1]), Number(parsed.searchParams.get('after_seq') ?? '0'));
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 });
+  }) as typeof globalThis.fetch;
+  return { fetchImpl, calls };
+}
+
+/**
+ * A `/matches/{id}/points` page builder for a match whose committed tape runs
+ * `1..maxSeq` — exactly what the real endpoint serves for any `after_seq`,
+ * gapless, oldest first, one page.
+ */
+const tapeUpTo =
+  (maxSeq: number) =>
+  (matchId: number, afterSeq: number): unknown => ({
+    match_id: matchId,
+    pbp_coverage: 'point',
+    quality: 'clean',
+    covers_from_start: true,
+    points: Array.from({ length: Math.max(0, maxSeq - afterSeq) }, (_, i) => ({
+      seq: afterSeq + 1 + i,
+    })),
+    last_seq: maxSeq,
+    has_more: false,
+  });
+
+/** A live `point` frame as the wire sends it — the point NESTED under `.point`. */
+const pointFrame = (matchId: number, seq: number) => ({
+  type: 'point',
+  match_id: matchId,
+  point: { seq, set: 1, game: 1, number: seq, server: 1, winner: 2 },
+  pbp_coverage: 'point',
+  quality: 'clean',
+});
+
+/**
  * Install a fake global `WebSocket` that speaks the Centrifugo v2 JSON server
  * side: acks the connect and every subscribe by id, then replays the given
  * publications. Returns the raw strings the client sent, so a test can assert
@@ -45,6 +122,8 @@ function installMockPushServer(
   opts: {
     /** Frames published on the first subscribed channel after its ack. */
     frames?: unknown[];
+    /** Frames published PER channel — overrides `frames` when given. */
+    framesByChannel?: Record<string, unknown[]>;
     /** Reply to every subscribe with this error instead of an ack. */
     subscribeError?: { code: number; message: string };
     /** Deliver all publications in ONE newline-batched message. */
@@ -121,7 +200,10 @@ function installMockPushServer(
         const channel = (msg.subscribe as { channel: string }).channel;
         setTimeout(() => {
           if (opts.ping) this.emit('message', { data: '{}' });
-          const pushes = (opts.frames ?? []).map((frame) =>
+          const frames = opts.framesByChannel
+            ? opts.framesByChannel[channel] ?? []
+            : opts.frames ?? [];
+          const pushes = frames.map((frame) =>
             JSON.stringify({ push: { channel, pub: { data: frame } } }),
           );
           if (opts.batch) {
@@ -436,5 +518,139 @@ describe('PushStream reconnect', () => {
     await next.catch(() => undefined);
     expect(calls).toHaveLength(1); // never reconnected
     expect(sent.filter((raw) => raw === '{}').length).toBeGreaterThan(0); // pongs flowed
+  });
+});
+
+describe('PushStream point feed', () => {
+  it('points: true subscribes the point slate from the mint vocabulary', async () => {
+    const { fetchImpl } = installPointsFetch();
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'point:slate': [pointFrame(9, 1)] },
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', points: true, fetch: fetchImpl });
+    const [frame] = await collect(stream, 1);
+    expect(frame!.type).toBe('point');
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['slate:all', 'point:slate']);
+  });
+
+  it('points: true subscribes one point channel per match, using the minted template', async () => {
+    const { fetchImpl } = installPointsFetch();
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'point:match:7': [pointFrame(7, 1)] },
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', matches: [7], points: true, fetch: fetchImpl });
+    await collect(stream, 1);
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['match:7', 'point:match:7']);
+  });
+
+  it('refuses loudly when the mint does not advertise the point channels — fatal, no re-mint', async () => {
+    // An unadvertised vocabulary is the server's honest refusal (the point
+    // gate is off, or the plan does not include points). Subscribing a guessed
+    // channel name would turn that refusal into a silent empty feed.
+    const { fetchImpl, calls } = installPointsFetch({ pointChannels: false });
+    installMockPushServer();
+    const stream = new PushStream({ apiKey: 'twjp_test', points: true, fetch: fetchImpl }); // default autoReconnect
+    const err = await collect(stream, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceUnavailable);
+    expect(String((err as Error).message)).toContain('point');
+    expect(calls).toHaveLength(1); // fatal — never re-minted
+  });
+
+  it('passes the live point frame through verbatim, payload nested under .point', async () => {
+    const wire = pointFrame(18953, 1);
+    const { fetchImpl } = installPointsFetch();
+    installMockPushServer({ framesByChannel: { 'point:match:18953': [wire] } });
+    const stream = new PushStream({ apiKey: 'twjp_test', matches: [18953], points: true, fetch: fetchImpl });
+    const [frame] = await collect(stream, 1);
+    expect(frame).toEqual(wire);
+    expect((frame!.point as Record<string, unknown>).seq).toBe(1);
+  });
+
+  it('catches up over REST on reconnect — replayed points arrive in seq order, duplicates dropped', { timeout: 15_000 }, async () => {
+    // Connection 1 delivers seq 1 live, then dies. By reconnect time the
+    // match has committed up to seq 3: the catch-up must fetch after the
+    // cursor (after_seq=1), yield 2 and 3 BEFORE any live frame of the new
+    // connection, and drop the replayed live seq 1 as a duplicate.
+    const { fetchImpl, calls } = installPointsFetch({ page: tapeUpTo(3) });
+    installMockPushServer({
+      framesByChannel: { 'point:match:5': [pointFrame(5, 1)] },
+      closeAfterFrames: true,
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', matches: [5], points: true, fetch: fetchImpl });
+    const got = await collect(stream, 3);
+    expect(got.map((f) => (f.point as Record<string, unknown>).seq)).toEqual([1, 2, 3]);
+    // The catch-up resumed exactly after the cursor, not from scratch.
+    const restCalls = calls.filter((url) => url.includes('/matches/5/points'));
+    expect(restCalls).toHaveLength(1);
+    expect(restCalls[0]).toContain('after_seq=1');
+  });
+
+  it('repairs a mid-stream gap over REST before the trigger frame, and reports it via onGap', async () => {
+    // Live delivers seq 1 then seq 4: the hole (2, 3) must be filled over
+    // REST and yielded BEFORE the frame that revealed it, with onGap fired
+    // once for observability.
+    const gaps: [number, number, number][] = [];
+    const { fetchImpl } = installPointsFetch({ page: tapeUpTo(4) });
+    installMockPushServer({
+      framesByChannel: { 'point:match:5': [pointFrame(5, 1), pointFrame(5, 4)] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      matches: [5],
+      points: true,
+      onGap: (matchId, expectedSeq, gotSeq) => gaps.push([matchId, expectedSeq, gotSeq]),
+      fetch: fetchImpl,
+    });
+    const got = await collect(stream, 4);
+    expect(got.map((f) => (f.point as Record<string, unknown>).seq)).toEqual([1, 2, 3, 4]);
+    expect(gaps).toEqual([[5, 2, 4]]);
+  });
+
+  it('back-fills a match first seen mid-play from seq 1, without reporting a gap', async () => {
+    // The first frame of an unseen match is normal operation (joining the
+    // slate mid-play), not a hole in a stream we were following: back-fill
+    // from the start, no onGap.
+    const gaps: unknown[] = [];
+    const { fetchImpl } = installPointsFetch({ page: tapeUpTo(3) });
+    installMockPushServer({
+      framesByChannel: { 'point:slate': [pointFrame(5, 3)] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      points: true,
+      onGap: (...gap) => gaps.push(gap),
+      fetch: fetchImpl,
+    });
+    const got = await collect(stream, 3);
+    expect(got.map((f) => (f.point as Record<string, unknown>).seq)).toEqual([1, 2, 3]);
+    expect(gaps).toEqual([]);
+  });
+
+  it('pointsResume: false takes the raw frames with no REST traffic', async () => {
+    const { fetchImpl, calls } = installPointsFetch({ page: tapeUpTo(3) });
+    installMockPushServer({
+      framesByChannel: { 'point:match:5': [pointFrame(5, 3)] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      matches: [5],
+      points: true,
+      pointsResume: false,
+      fetch: fetchImpl,
+    });
+    const [frame] = await collect(stream, 1);
+    expect((frame!.point as Record<string, unknown>).seq).toBe(3); // raw, no back-fill
+    expect(calls.filter((url) => url.includes('/points'))).toHaveLength(0);
+    expect(calls.filter((url) => url.includes('/ws-token'))).toHaveLength(1);
   });
 });

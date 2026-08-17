@@ -174,6 +174,55 @@ describe('LiveScoreStream frame dispatch', () => {
     expect(got[1]!.outcome).toBe('held');
   });
 
+  it('yields point frames when the points signal was requested — no longer silently dropped', async () => {
+    // The real point frame shape, verbatim: the committed point is NESTED
+    // under `.point` exactly as score frames nest theirs under `.score`,
+    // with the page-level coverage/quality alongside it on the frame.
+    const wire = {
+      type: 'point',
+      match_id: 18953,
+      point: {
+        seq: 42,
+        set: 2,
+        game: 5,
+        number: 3,
+        tiebreak: false,
+        server: 1,
+        winner: 2,
+        score: { p1: '30', p2: '40' },
+        sets: [1, 0],
+        games: [[6, 2], [3, 2]],
+        ts: '2026-08-17T14:03:21Z',
+      },
+      pbp_coverage: 'point',
+      quality: 'clean',
+    };
+    const { sent } = installMockWebSocket({ frames: [wire] });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', signals: ['points'] });
+    const [frame] = await collect(stream, 1);
+    expect(JSON.parse(sent[0]!).signals).toEqual(['points']);
+    expect(frame).toEqual(wire);
+    const point = frame!.point as Record<string, unknown>;
+    expect(point.seq).toBe(42);
+    expect(point.winner).toBe(2);
+    // Nothing is flattened onto the frame.
+    expect(frame!.seq).toBeUndefined();
+  });
+
+  it('preserves order across a mixed score/point stream', async () => {
+    installMockWebSocket({
+      frames: [
+        { type: 'score', match_id: 1 },
+        { type: 'point', match_id: 1, point: { seq: 1 } },
+        { type: 'point', match_id: 1, point: { seq: 2 } },
+        { type: 'score', match_id: 1 },
+      ],
+    });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', signals: ['points'] });
+    const got = await collect(stream, 4);
+    expect(got.map((f) => f.type)).toEqual(['score', 'point', 'point', 'score']);
+  });
+
   it('swallows ping and subscribed frames', async () => {
     installMockWebSocket({
       frames: [
