@@ -249,7 +249,7 @@ const { token, ws_url, channels } = await client.getWsToken();
 | `listMatches` `getMatch` `getMatchScore` | ✅ | ✅ | ✅ | ✅ |
 | `searchPlayers` `getPlayer` `listFixtures` | ✅ | ✅ | ✅ | ✅ |
 | `listTournaments` `getTournament` | ✅ | ✅ | ✅ | ✅ |
-| `listCompletedMatches` `getMatchTape` (history) | — | ✅¹ | ✅ | ✅ |
+| `listCompletedMatches` `getMatchTape` (history) `getHistoryCoverage` | — | ✅¹ | ✅ | ✅ |
 | `listArchiveMatches` `getArchiveMatch` `listArchivePlayers` `getArchiveCareer` `getH2H` (results archive · head-to-head) | — | ✅¹ | ✅ | ✅ |
 | `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
 | `listRankings` (rank-ordered listing) | — | — | ✅ | ✅ |
@@ -387,6 +387,38 @@ const profile = await client.getChartingPlayer('graf', { gender: 'women' });
 const packages = await client.listHistoryPackages();
 const manifest = await client.getHistoryPackage('2026-07');
 ```
+
+## Singles vs doubles, and the coverage table
+
+Every match carries `draw`: `'singles'`, `'doubles'`, or null — and the null
+is an answer, not a gap. Team ties and team exhibitions never state which
+discipline a rubber was, so those matches carry a null draw rather than a
+guess (`is_doubles` remains, but cannot say "unknown"). The same word filters
+`listMatches()`, `listCompletedMatches()`, `listTournaments()` and
+`listFixtures()`; a null-draw row matches NEITHER filter value, so filtering
+by `singles` and then by `doubles` is not everything.
+
+```ts
+const page = await client.listCompletedMatches({ tour: 'itf', draw: 'singles' });
+
+const cov = await client.getHistoryCoverage();   // BASIC, or any History plan
+console.log(cov.as_of, cov.totals);
+for (const [name, bucket] of Object.entries(cov.buckets ?? {})) {
+  console.log(name, bucket.point_complete, 'of', bucket.completed);
+}
+```
+
+`getHistoryCoverage()` states, per `tour_draw` bucket (`atp_singles`,
+`itf_doubles`, …), how many completed matches we hold, how many carry any
+tape, how many have a complete point-by-point tape available, and how many a
+default read serves complete. As of 2026-08-18 the totals were: 174,393
+completed matches; 171,808 (98.5%) with a tape; 91,318 (52.4%) with a
+complete tape available — of which 81,196 (46.6% of completed) were served
+complete on a default read. The buckets are why the draw split exists: on the
+same date ITF **singles** was 51.1% point-complete while ITF **doubles** was
+3.5% — a single `itf` number would have hidden both. The table is a built
+artifact (`as_of` stamps the build): a 503 `coverage_unavailable` means it is
+not built yet, not that coverage is zero.
 
 ## Pagination
 
