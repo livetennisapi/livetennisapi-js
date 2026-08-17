@@ -45,7 +45,7 @@ function installPointsFetch(
   opts: {
     /** Advertise `point_match` / `point_slate` in the mint. Default true. */
     pointChannels?: boolean;
-    /** Build the `/matches/{id}/points` response body. */
+    /** Build the `/matches/{id}/points` response body. Return null to 404. */
     page?: (matchId: number, afterSeq: number) => unknown;
   } = {},
 ) {
@@ -74,10 +74,12 @@ function installPointsFetch(
     const match = parsed.pathname.match(/\/matches\/(\d+)\/points$/);
     if (match && opts.page) {
       const body = opts.page(Number(match[1]), Number(parsed.searchParams.get('after_seq') ?? '0'));
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      if (body !== null) {
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
     }
     return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 });
   }) as typeof globalThis.fetch;
@@ -634,6 +636,93 @@ describe('PushStream point feed', () => {
     const got = await collect(stream, 3);
     expect(got.map((f) => (f.point as Record<string, unknown>).seq)).toEqual([1, 2, 3]);
     expect(gaps).toEqual([]);
+  });
+
+  it('walks a multi-page gap fill with the server cursor, bounded by the trigger frame', async () => {
+    // Live delivers seq 1 then seq 6 with the server paging two points at a
+    // time: the fill must follow last_seq/has_more across pages (after_seq=1,
+    // then after_seq=3), yield 2..5 in order, and stop BEFORE the trigger's
+    // seq — the trigger frame yields itself.
+    const gaps: [number, number, number][] = [];
+    const pagedTape =
+      (maxSeq: number, pageSize: number) => (matchId: number, afterSeq: number) => {
+        const end = Math.min(afterSeq + pageSize, maxSeq);
+        return {
+          match_id: matchId,
+          pbp_coverage: 'point',
+          quality: 'clean',
+          points: Array.from({ length: Math.max(0, end - afterSeq) }, (_, i) => ({
+            seq: afterSeq + 1 + i,
+          })),
+          last_seq: end,
+          has_more: end < maxSeq,
+        };
+      };
+    const { fetchImpl, calls } = installPointsFetch({ page: pagedTape(6, 2) });
+    installMockPushServer({
+      framesByChannel: { 'point:match:5': [pointFrame(5, 1), pointFrame(5, 6)] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      matches: [5],
+      points: true,
+      onGap: (matchId, expectedSeq, gotSeq) => gaps.push([matchId, expectedSeq, gotSeq]),
+      fetch: fetchImpl,
+    });
+    const got = await collect(stream, 6);
+    expect(got.map((f) => (f.point as Record<string, unknown>).seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(gaps).toEqual([[5, 2, 6]]);
+    const restCalls = calls.filter((url) => url.includes('/matches/5/points'));
+    expect(restCalls).toHaveLength(2);
+    expect(restCalls[0]).toContain('after_seq=1');
+    expect(restCalls[1]).toContain('after_seq=3');
+  });
+
+  it('a 404 during catch-up prunes that match and moves on — one vanished match cannot wedge the stream', { timeout: 15_000 }, async () => {
+    // Cursors are never pruned in slate mode, so a long-running stream WILL
+    // hold cursors for matches that have aged out of the live window. Their
+    // 404 must drop the cursor and let the other matches catch up — not
+    // abort the connection into an eternal reconnect -> same-404 loop that
+    // never delivers a frame again.
+    const { fetchImpl, calls } = installPointsFetch({
+      page: (matchId, afterSeq) => (matchId === 4 ? null : tapeUpTo(2)(matchId, afterSeq)),
+    });
+    installMockPushServer({
+      framesByChannel: { 'point:slate': [pointFrame(4, 1), pointFrame(5, 1)] },
+      closeAfterFrames: true,
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', points: true, fetch: fetchImpl });
+    const got = await collect(stream, 3);
+    expect(got.map((f) => [f.match_id, (f.point as Record<string, unknown>).seq])).toEqual([
+      [4, 1],
+      [5, 1],
+      [5, 2], // match 5 still caught up, even though match 4's catch-up 404ed first
+    ]);
+    expect(calls.filter((url) => url.includes('/matches/4/points'))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes('/matches/5/points'))).toHaveLength(1);
+  });
+
+  it('never subscribes one channel twice — points: true deduped against a legacy channels entry', async () => {
+    // The README migrates `channels: ['point:slate']` users to `points: true`;
+    // keeping both must not double-subscribe the channel (a server-side
+    // "already subscribed" reply error and reconnect churn).
+    const { fetchImpl } = installPointsFetch();
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'point:slate': [pointFrame(9, 1)] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      points: true,
+      channels: ['point:slate'],
+      fetch: fetchImpl,
+    });
+    const [frame] = await collect(stream, 1);
+    expect(frame!.type).toBe('point');
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['point:slate']);
   });
 
   it('pointsResume: false takes the raw frames with no REST traffic', async () => {

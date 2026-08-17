@@ -54,6 +54,7 @@ import { DEFAULT_BASE_URL, LiveTennisAPI, readEnv } from './client.js';
 import {
   APIConnectionError,
   LiveTennisAPIError,
+  NotFound,
   ServiceUnavailable,
   Unauthorized,
   UpgradeRequired,
@@ -298,7 +299,11 @@ export class PushStream {
     names.push(...this.channels);
     if (!names.length) names.push(typeof channels?.slate === 'string' ? channels.slate : 'slate:all');
     if (this.points) names.push(...this.pointChannelsFor(channels));
-    return names;
+    // Dedupe: subscribing one channel twice on a single connection (a
+    // duplicated match id, or `points: true` combined with the legacy
+    // `channels: ['point:slate']` escape hatch) is a server-side reply ERROR
+    // (already subscribed), which would put the stream into reconnect churn.
+    return [...new Set(names)];
   }
 
   /**
@@ -375,7 +380,19 @@ export class PushStream {
    */
   private async *catchUp(): AsyncGenerator<PushFrame, void, unknown> {
     for (const matchId of [...this.cursors.keys()]) {
-      yield* this.fetchPoints(matchId);
+      try {
+        yield* this.fetchPoints(matchId);
+      } catch (err) {
+        // A match that has aged out of the live window answers 404. That is
+        // permanent for THIS match and says nothing about the others: drop
+        // its cursor (nothing more can ever arrive for it) and move on.
+        // Without this, one vanished match wedges the stream forever — the
+        // NotFound aborts the connection, the reconnect re-runs catch-up on
+        // the same cursors, and the identical 404 fires again before any
+        // frame is ever delivered. Everything else still propagates.
+        if (!(err instanceof NotFound)) throw err;
+        this.cursors.delete(matchId);
+      }
     }
   }
 
