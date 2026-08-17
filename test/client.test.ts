@@ -118,6 +118,20 @@ describe('error mapping', () => {
     await expect(client.getMatchStatistics(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
   });
 
+  it('names ULTRA on a points 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getMatchPoints(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
+  });
+
+  it('surfaces points_disabled as BadRequest with the code readable', async () => {
+    // The server-gated refusal: the gate is off, or the plan has no points.
+    // A 400, not a 403 — and not a retry case, so the code must stay readable.
+    const { client } = clientReturning(json(400, { error: 'points_disabled' }), { maxRetries: 0 });
+    const err = await client.getMatchPoints(1).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequest);
+    expect(err.errorCode).toBe('points_disabled');
+  });
+
   it('names ULTRA on every rally 403, whichever id space addressed it', async () => {
     // `/rally/matches` and `/history/matches/{id}/rally` are the same ULTRA
     // product; the `/history` prefix of the latter must not demote it to BASIC.
@@ -434,6 +448,33 @@ describe('requests', () => {
     expect(calls[1]!.url).toContain('system=atp&system=utr');
   });
 
+  it('passes the Elo listing filters through', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listRankings({
+      system: 'elo',
+      tour: 'atp',
+      surface: 'clay',
+      archive_player: true,
+      min_matches: 20,
+      activity_weeks: 52,
+    });
+    expect(calls[0]!.url).toContain('system=elo');
+    expect(calls[0]!.url).toContain('tour=atp');
+    expect(calls[0]!.url).toContain('surface=clay');
+    expect(calls[0]!.url).toContain('archive_player=true');
+    expect(calls[0]!.url).toContain('min_matches=20');
+    expect(calls[0]!.url).toContain('activity_weeks=52');
+  });
+
+  it('builds the points path and passes after_seq through', async () => {
+    const { client, calls } = clientReturning(json(200, { points: [] }));
+    await client.getMatchPoints(18953);
+    expect(calls[0]!.url).toContain(`${BASE}/matches/18953/points`);
+    expect(calls[0]!.url).not.toContain('after_seq=');
+    await client.getMatchPoints(18953, { after_seq: 120 });
+    expect(calls[1]!.url).toContain('after_seq=120');
+  });
+
   it('builds the packages paths with kind and year', async () => {
     const { client, calls } = clientReturning(json(200, { data: [] }));
     await client.listHistoryPackages();
@@ -489,6 +530,58 @@ describe('pagination', () => {
     });
     for await (const _ of client.paginate((p) => client.listMatches(p), 5000)) void _;
     expect(calls[0]).toContain('limit=200');
+  });
+});
+
+describe('point feed paging', () => {
+  it('iterateMatchPoints follows has_more/last_seq across pages', async () => {
+    const { client, calls } = clientReturning([
+      json(200, {
+        match_id: 5,
+        pbp_coverage: 'point',
+        quality: 'clean',
+        points: [{ seq: 1 }, { seq: 2 }],
+        last_seq: 2,
+        has_more: true,
+      }),
+      json(200, {
+        match_id: 5,
+        pbp_coverage: 'point',
+        quality: 'clean',
+        points: [{ seq: 3 }],
+        last_seq: 3,
+        has_more: false,
+      }),
+    ]);
+    const seqs: (number | undefined)[] = [];
+    for await (const point of client.iterateMatchPoints(5)) seqs.push(point.seq);
+    expect(seqs).toEqual([1, 2, 3]);
+    expect(calls).toHaveLength(2);
+    // The server's OWN cursor drives the walk, not a client-side count.
+    expect(calls[0]!.url).toContain('after_seq=0');
+    expect(calls[1]!.url).toContain('after_seq=2');
+  });
+
+  it('starts from the given afterSeq', async () => {
+    const { client, calls } = clientReturning(
+      json(200, { points: [{ seq: 121 }], last_seq: 121, has_more: false }),
+    );
+    const seqs: (number | undefined)[] = [];
+    for await (const point of client.iterateMatchPoints(5, 120)) seqs.push(point.seq);
+    expect(seqs).toEqual([121]);
+    expect(calls[0]!.url).toContain('after_seq=120');
+  });
+
+  it('stops instead of looping when the cursor fails to advance', async () => {
+    // has_more: true with a last_seq that did not move would refetch the same
+    // page forever; the iterator must stop rather than spin.
+    const { client, calls } = clientReturning(
+      json(200, { points: [{ seq: 1 }], last_seq: 0, has_more: true }),
+    );
+    const seqs: (number | undefined)[] = [];
+    for await (const point of client.iterateMatchPoints(5)) seqs.push(point.seq);
+    expect(seqs).toEqual([1]);
+    expect(calls).toHaveLength(1);
   });
 });
 
