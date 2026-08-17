@@ -25,8 +25,12 @@
  * Pass `signals: ['break_point']` to also receive the headline break-point feed:
  * `break_point` frames (yielded as {@link BreakPoint}) the instant a break point
  * arises and `break_point_result` frames ({@link BreakPointResult}) when it
- * resolves. Narrow on `frame.type` to tell frames apart. With no `signals` the
- * stream yields only `score` frames, exactly as before.
+ * resolves. Pass `signals: ['points']` to also receive the live point feed:
+ * one `point` frame ({@link PointUpdate}) per committed point, its payload
+ * nested under `.point` with the gapless per-match `seq`. Point frames flow
+ * only where the server's point gate is on and the plan includes points.
+ * Narrow on `frame.type` to tell frames apart. With no `signals` the stream
+ * yields only `score` frames, exactly as before.
  *
  * Reconnects automatically with exponential backoff and re-subscribes. It does
  * **not** reconnect on a bad key, an insufficient tier, or the service being
@@ -44,7 +48,7 @@ import {
   Unauthorized,
   UpgradeRequired,
 } from './errors.js';
-import type { BreakPoint, BreakPointResult, ScoreUpdate, StreamFrame } from './types.js';
+import type { BreakPoint, BreakPointResult, PointUpdate, ScoreUpdate, StreamFrame } from './types.js';
 
 /** The server drops the socket if the subscribe frame is late. */
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
@@ -80,7 +84,8 @@ export interface StreamOptions {
   /** `live-scores` for every live match, or `match:<id>`. */
   topics?: string[];
   /**
-   * Opt-in signals to receive on top of score frames, e.g. `['break_point']`.
+   * Opt-in signals to receive on top of score frames, e.g. `['break_point']`
+   * or `['points']` (the live point feed — server-gated and plan-gated).
    * Omitted (the default) means score frames only — identical to before. ULTRA.
    */
   signals?: string[];
@@ -198,7 +203,8 @@ export class LiveScoreStream {
    *
    * Score frames come as {@link ScoreUpdate}. When `signals` requested
    * `break_point`, break-point frames come as {@link BreakPoint} and
-   * {@link BreakPointResult}. With no signals only {@link ScoreUpdate} is ever
+   * {@link BreakPointResult}; when it requested `points`, point frames come
+   * as {@link PointUpdate}. With no signals only {@link ScoreUpdate} is ever
    * yielded, exactly as before. Narrow on `frame.type`.
    */
   async *listen(): AsyncGenerator<StreamFrame, void, unknown> {
@@ -295,6 +301,7 @@ export class LiveScoreStream {
             if (frame.type === 'score') yield frame as ScoreUpdate;
             else if (frame.type === 'break_point') yield frame as BreakPoint;
             else if (frame.type === 'break_point_result') yield frame as BreakPointResult;
+            else if (frame.type === 'point') yield frame as PointUpdate;
             else if (frame.type === 'error') LiveScoreStream.raiseFrameError(frame);
             // 'ping' and 'subscribed' are protocol noise.
           }
