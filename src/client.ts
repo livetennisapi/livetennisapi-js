@@ -33,12 +33,14 @@ import type {
   Fixture,
   HeadToHead,
   HistoryPackage,
+  LivePoint,
   Market,
   Match,
   MatchEvent,
   MatchStatistics,
   MatchStatus,
   PackageKind,
+  PointsPage,
   RallyMatch,
   RallyMatchDetail,
   RankingsPage,
@@ -67,6 +69,7 @@ const MAX_LIMIT = 200;
 const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/analysis', 'ULTRA'],
   ['/statistics', 'ULTRA'],
+  ['/points', 'ULTRA'],
   // `/rally` also matches `/history/matches/{id}/rally`, so it must sit above
   // the BASIC `/history` marker.
   ['/rally', 'ULTRA'],
@@ -536,6 +539,52 @@ export class LiveTennisAPI {
   }
 
   /**
+   * One page of the live point feed for a match — committed points in order,
+   * at most 500 per page. **ULTRA**, and server-gated: a 400 `points_disabled`
+   * means the server's point gate is off or the plan does not include points
+   * (not a retry case), a 400 `bad_after_seq` means the cursor was malformed,
+   * a 404 means no such match.
+   *
+   * `after_seq` resumes EXACTLY after a point you already hold: `point.seq`
+   * is per-match, monotonic and gapless (`1..N`), so it doubles as the dedup
+   * key. Page with the response's own cursor — pass `last_seq` back as
+   * `after_seq` while `has_more` is true — or let {@link iterateMatchPoints}
+   * do it. Read `pbp_coverage` before treating rows as points (`'game'` rows
+   * are game-grain commits) and treat an absent `covers_from_start` as "not
+   * stated" (older servers), never as false.
+   */
+  getMatchPoints(matchId: number, params: { after_seq?: number } = {}): Promise<PointsPage> {
+    return this.request(`/matches/${matchId}/points`, params);
+  }
+
+  /**
+   * Walk the live point feed for a match from `afterSeq` to the current end,
+   * following `has_more` / `last_seq` across pages. **ULTRA.**
+   *
+   * ```ts
+   * for await (const point of client.iterateMatchPoints(18953)) {
+   *   console.log(point.seq, point.winner);
+   * }
+   * ```
+   *
+   * Ends when the server says `has_more: false` — on a live match that is
+   * "everything committed so far", not "the match is over"; resume later with
+   * the last `seq` you saw.
+   */
+  async *iterateMatchPoints(matchId: number, afterSeq = 0): AsyncGenerator<LivePoint, void, unknown> {
+    let cursor = afterSeq;
+    for (;;) {
+      const page = await this.getMatchPoints(matchId, { after_seq: cursor });
+      for (const point of page.points ?? []) yield point;
+      if (!page.has_more) return;
+      // The server's own cursor drives the walk. A cursor that fails to
+      // advance would refetch the same page forever, so stop instead.
+      if (typeof page.last_seq !== 'number' || page.last_seq <= cursor) return;
+      cursor = page.last_seq;
+    }
+  }
+
+  /**
    * The per-match tape: point-by-point score sequence + per-point model
    * probabilities. **BASIC** (or any History plan).
    *
@@ -631,6 +680,18 @@ export class LiveTennisAPI {
    *
    * Read `meta.coverage` before trusting an empty result: ITF and UTR
    * history begins 2026-07-29 and cannot be reconstructed earlier.
+   *
+   * **Elo** (`system: 'elo'`) follows two rules of its own:
+   * - it is NEVER implied — omitting `system` returns the published-ranking
+   *   systems only, so Elo records appear exactly when you name it;
+   * - the Elo LISTING (leaderboard mode) requires `tour` — ratings are
+   *   computed per tour, and the two tables are not one leaderboard.
+   *
+   * The remaining filters shape the Elo listing: `surface` selects the
+   * surface-specific rating; `archive_player: true` widens it to archive-era
+   * players; `min_matches` / `activity_weeks` bound who qualifies for the
+   * board (a minimum rated-match count, and how recently a player must have
+   * played).
    */
   listRankings(
     params: {
@@ -638,6 +699,16 @@ export class LiveTennisAPI {
       /** `YYYY-MM-DD`. Omit for the latest known record. */
       as_of?: string;
       system?: RankingSystem | RankingSystem[];
+      /** Required by the Elo listing; ignored by systems that carry their own tour. */
+      tour?: 'atp' | 'wta';
+      /** Elo listing: the surface-specific rating instead of the overall one. */
+      surface?: 'hard' | 'clay' | 'grass';
+      /** Elo listing: include archive-era players on the board. */
+      archive_player?: boolean;
+      /** Elo listing: minimum rated matches to qualify for the board. */
+      min_matches?: number;
+      /** Elo listing: only players active within this many weeks. */
+      activity_weeks?: number;
     } & ListParams = {},
   ): Promise<RankingsPage> {
     // The 403 tier depends on the MODE, which the path alone cannot say:
