@@ -368,6 +368,42 @@ describe('requests', () => {
     expect(calls[0]!.url).toContain('coverage=from_start');
   });
 
+  it('passes the draw filter through on every listing that takes it', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches({ draw: 'singles' });
+    await client.listCompletedMatches({ tour: 'itf', draw: 'doubles' });
+    await client.listTournaments({ draw: 'singles' });
+    await client.listFixtures({ tour: 'itf', draw: 'singles' });
+    expect(calls[0]!.url).toContain('draw=singles');
+    expect(calls[1]!.url).toContain('draw=doubles');
+    expect(calls[2]!.url).toContain('draw=singles');
+    expect(calls[3]!.url).toContain('tour=itf');
+    expect(calls[3]!.url).toContain('draw=singles');
+  });
+
+  it('omits draw when not given', async () => {
+    const { client, calls } = clientReturning(json(200, { data: [] }));
+    await client.listMatches();
+    await client.listFixtures();
+    expect(calls[0]!.url).not.toContain('draw=');
+    expect(calls[1]!.url).not.toContain('draw=');
+  });
+
+  it('surfaces bad_draw as BadRequest with the allowed list readable', async () => {
+    // The server owns draw validation; the SDK passes the value through and
+    // keeps the refusal's vocabulary reachable.
+    const { client } = clientReturning(
+      json(400, { error: 'bad_draw', allowed: ['singles', 'doubles'] }),
+      { maxRetries: 0 },
+    );
+    const err = await client
+      .listMatches({ draw: 'mixed' as never })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequest);
+    expect(err.errorCode).toBe('bad_draw');
+    expect((err.body as { allowed: string[] }).allowed).toEqual(['singles', 'doubles']);
+  });
+
   it('builds the tournament paths', async () => {
     const { client, calls } = clientReturning(json(200, { data: [] }));
     await client.listTournaments({ search: 'wimbledon', tour: 'atp' });
@@ -500,6 +536,55 @@ describe('requests', () => {
     const tok = await client.getWsToken();
     expect(calls[0]!.url).toContain(`${BASE}/ws-token`);
     expect(tok.channels?.slate).toBe('slate:all');
+  });
+});
+
+describe('history coverage', () => {
+  // /history/coverage is one measured object, not a list — and its 503 is an
+  // answer ("not built yet"), which must stay distinguishable.
+  const body = {
+    as_of: '2026-08-18T04:15:00Z',
+    method: 'ledger',
+    buckets: {
+      itf_singles: {
+        completed: 1000,
+        any_tape: 980,
+        point_complete: 511,
+        complete_on_default_read: 440,
+        share: 0.511,
+      },
+    },
+    totals: {
+      completed: 1000,
+      any_tape: 980,
+      point_complete: 511,
+      complete_on_default_read: 440,
+      share: 0.511,
+    },
+  };
+
+  it('builds the path and returns the object as-is', async () => {
+    const { client, calls } = clientReturning(json(200, body));
+    const cov = await client.getHistoryCoverage();
+    expect(calls[0]!.url).toContain(`${BASE}/history/coverage`);
+    expect(cov.as_of).toBe('2026-08-18T04:15:00Z');
+    expect(cov.method).toBe('ledger');
+    expect(cov.buckets!.itf_singles!.point_complete).toBe(511);
+    expect(cov.totals!.complete_on_default_read).toBe(440);
+  });
+
+  it('names BASIC on a coverage 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getHistoryCoverage()).rejects.toMatchObject({ requiredTier: 'BASIC' });
+  });
+
+  it('surfaces the not-built 503 with its code readable', async () => {
+    const { client } = clientReturning(json(503, { error: 'coverage_unavailable' }), {
+      maxRetries: 0,
+    });
+    const err = await client.getHistoryCoverage().catch((e) => e);
+    expect(err).toBeInstanceOf(ServiceUnavailable);
+    expect(err.errorCode).toBe('coverage_unavailable');
   });
 });
 
