@@ -30,6 +30,8 @@ import type {
   ChartingMatch,
   ChartingPlayer,
   Coverage,
+  CoveragePage,
+  Draw,
   Fixture,
   HeadToHead,
   HistoryPackage,
@@ -341,6 +343,11 @@ export class LiveTennisAPI {
    *   3-letter code. The vocabulary is what the Player object returns —
    *   IOC-style codes (`ned`, `sui`, `gre`), NOT ISO-3166. Players with no
    *   recorded country never match.
+   * - `draw` — `'singles' | 'doubles'`, matching `Match.draw`. That field is
+   *   three-valued, and a null-draw match (team ties, team exhibitions — the
+   *   draw is unknown) matches NEITHER value: filtering by `singles` and then
+   *   by `doubles` is not everything. Anything else is a 400 `bad_draw` with
+   *   the allowed list in the body.
    *
    * The status default is applied AFTER the spread. With the spread last, an
    * explicit `status: undefined` — which is what `{ status: someMaybeUndefined }`
@@ -351,6 +358,7 @@ export class LiveTennisAPI {
     params: {
       status?: MatchStatus;
       tour?: Tour;
+      draw?: Draw;
       player?: number | number[];
       country?: string;
       from?: string;
@@ -404,16 +412,24 @@ export class LiveTennisAPI {
    * Completed matches, newest first, with a derived `winner`. **BASIC** (or
    * any History plan).
    *
-   * Takes the same `tour` / `player` / `country` / `from` / `to` filters as
-   * `listMatches()`, plus `coverage` — keep only matches whose tape has that
+   * Takes the same `tour` / `draw` / `player` / `country` / `from` / `to`
+   * filters as `listMatches()` (a null-draw row matches neither `draw`
+   * value), plus `coverage` — keep only matches whose tape has that
    * coverage. Note the coverage filter is applied AFTER the page is cut, so a
    * filtered page is routinely shorter than `limit` (and may be empty) while
    * later pages still hold matching matches — a short filtered page is not an
    * end-of-data signal there.
+   *
+   * Each row carries a `tape` block (coverage and row count, plus — where the
+   * server measures them — `points_complete`, `completeness`,
+   * `starts_at_love` and `computed_at`), readable through the types' index
+   * signature. An absent field there means an older server or "not measured"
+   * — never "no".
    */
   listCompletedMatches(
     params: {
       tour?: Tour;
+      draw?: Draw;
       player?: number | number[];
       country?: string;
       from?: string;
@@ -424,17 +440,23 @@ export class LiveTennisAPI {
     return this.request('/history/matches', params);
   }
 
-  /** Upcoming scheduled fixtures, earliest first. */
-  listFixtures(params: { tour?: Tour } & ListParams = {}): Promise<Page<Fixture>> {
+  /**
+   * Upcoming scheduled fixtures, earliest first. A fixture whose draw is
+   * unknown matches neither `draw` value.
+   */
+  listFixtures(params: { tour?: Tour; draw?: Draw } & ListParams = {}): Promise<Page<Fixture>> {
     return this.request('/fixtures', params);
   }
 
   /**
    * Tournament catalogue, name order — the stable id space
    * `Match.tournament_id` joins. `search` is a case-insensitive substring
-   * match on the tournament name.
+   * match on the tournament name; a tournament whose draw is unknown matches
+   * neither `draw` value.
    */
-  listTournaments(params: { search?: string; tour?: Tour } & ListParams = {}): Promise<Page<Tournament>> {
+  listTournaments(
+    params: { search?: string; tour?: Tour; draw?: Draw } & ListParams = {},
+  ): Promise<Page<Tournament>> {
     return this.request('/tournaments', params);
   }
 
@@ -598,6 +620,23 @@ export class LiveTennisAPI {
    */
   getMatchTape(matchId: number, params: { sequence?: 'raw' | 'clean' } = {}): Promise<Tape> {
     return this.request(`/history/matches/${matchId}`, params);
+  }
+
+  /**
+   * The measured point-completeness table, one object. **BASIC** (or any
+   * History plan).
+   *
+   * Per `tour_draw` bucket (`atp_singles`, `itf_doubles`, …): how many
+   * completed matches we hold (`completed`), how many carry any tape
+   * (`any_tape`), how many have a complete point-by-point tape AVAILABLE
+   * (`point_complete`), how many a default read serves complete
+   * (`complete_on_default_read`), and the `share` — with `totals` across
+   * every bucket. The numbers are a built artifact: `as_of` stamps the
+   * build, `method` how they were measured, and a 503 `coverage_unavailable`
+   * means the artifact is not built yet — not that coverage is zero.
+   */
+  getHistoryCoverage(): Promise<CoveragePage> {
+    return this.request('/history/coverage');
   }
 
   /**
