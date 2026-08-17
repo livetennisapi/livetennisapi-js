@@ -1086,8 +1086,8 @@ export interface CoverageBucket extends Extensible {
   point_complete?: number;
   /** How many a default read serves complete — at most `point_complete`. */
   complete_on_default_read?: number;
-  /** `point_complete / completed`. */
-  share?: number;
+  /** `point_complete / completed` — null on an empty bucket (`completed` 0). */
+  share?: number | null;
 }
 
 /**
