@@ -3,6 +3,74 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — 2026-08-17
+
+### Added
+- **The live point feed, end to end.** One record per committed point, keyed
+  by `seq` — per-match, monotonic and **gapless** (`1..N`), so it is the
+  dedup key and the resume cursor in one field. ULTRA, **and server-gated on
+  top of it**: points are served only where the server's point gate is on and
+  the plan includes points (see *Notes* below — this SDK treats the gate's
+  refusal as an answer, not a retry case).
+  - **REST:** `getMatchPoints(matchId, { after_seq })` returns one
+    `PointsPage` (at most 500 points, oldest first) with the server's own
+    resume cursor (`last_seq` / `has_more`), and
+    `iterateMatchPoints(matchId, afterSeq)` walks that cursor across pages —
+    stopping, rather than spinning, if the cursor ever fails to advance. On a
+    live match the walk ends at "everything committed so far", not "the match
+    is over"; resume later from the last `seq` you saw.
+  - **Types:** `LivePoint` (the committed point: `seq`, set/game/number,
+    `tiebreak`, `server`, `winner`, the point score after the point, the
+    running match score in the same player-major layout as `Score`, and `ts`
+    — the CAPTURE time, not when the point was played), `PointsPage`
+    (`pbp_coverage: 'point' | 'game'` — read it before treating rows as
+    points, `'game'` rows are game-grain commits; `quality:
+    'clean' | 'revised'`; `covers_from_start`, which may be ABSENT on older
+    servers and then means "not stated", never "no"), and `PointUpdate` — the
+    `point` frame both live transports deliver, payload nested under `.point`
+    exactly as score frames nest theirs under `.score`.
+  - **Native feed:** `signals: ['points']` on `LiveScoreStream` now yields
+    the `point` frames as `PointUpdate` alongside score (and break-point)
+    frames — narrow on `frame.type`. With no `signals` the stream behaves
+    exactly as before.
+  - **Push feed:** `points: true` on `PushStream` subscribes the point
+    channels resolved from the `/ws-token` mint's **own advertised
+    vocabulary** (`point_match` / `point_slate`) — never a guessed channel
+    name — and brings what an event feed needs that complete-state score
+    frames do not: `pointsResume` (default on with `points`) keeps a
+    per-match last-`seq` cursor that survives reconnects, catches up over
+    REST on every (re)connect and yields the replayed points BEFORE any live
+    frame, drops duplicates (`seq` at or below the cursor), and repairs a
+    mid-stream gap (`seq` jumping past `cursor + 1`) over REST before
+    yielding the frame that revealed it. `onGap(matchId, expectedSeq,
+    gotSeq)` observes that repair. Slate caveat, documented on the option:
+    cursors are per match, so a match that went live entirely inside an
+    outage catches up only when its first live frame arrives (a back-fill
+    from `seq` 1, not a reported gap). `pointsResume: false` takes the raw
+    frames with no REST traffic.
+- **`system: 'elo'` on `listRankings()`** — our own surface-aware Elo rating
+  joins the ranking-system vocabulary, with the listing filters to shape its
+  leaderboard: `tour` (**required** by the Elo listing — ratings are computed
+  per tour, and the ATP and WTA tables are not one leaderboard), `surface`
+  (the surface-specific rating), `archive_player` (widen the board to
+  archive-era players), and `min_matches` / `activity_weeks` (who qualifies).
+  Elo is deliberately **never implied**: omitting `system` returns the
+  published-ranking systems only, so Elo records appear exactly when you name
+  them.
+
+### Notes
+- **The point feed is server-gated, and this SDK says so instead of papering
+  over it.** A plan (or a server) without the point feed answers the REST
+  endpoint with `400 points_disabled` — surfaced as `BadRequest` with the
+  code readable on `err.errorCode` — and the `/ws-token` mint simply does not
+  advertise the point channels, which `PushStream` surfaces as
+  `ServiceUnavailable` naming the cause rather than subscribing a guessed
+  channel and delivering a silent empty feed. Neither refusal is retried:
+  they are the server's honest answer, not a transient fault. Whether any
+  given match carries point-grain rows is a data question the response itself
+  answers (`pbp_coverage`, `covers_from_start`) — this client adds no claims
+  of its own on top.
+
 ## [1.5.0] — 2026-08-16
 
 ### Added
