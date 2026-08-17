@@ -279,6 +279,81 @@ export interface PushFrame extends Extensible {
   score?: Score;
 }
 
+/**
+ * One committed point of the live point feed. **ULTRA**, and server-gated:
+ * served only where the point gate is on and the plan includes points.
+ *
+ * `seq` is the spine of the whole feed: per-match, monotonic and GAPLESS,
+ * `1..N` in point order. It is the dedup key and the resume cursor — a point
+ * you have seen has a `seq` you have seen, and `getMatchPoints({ after_seq })`
+ * resumes exactly after it. `winner` is who won the point, null when the feed
+ * committed the state without an attributable winner. `score` is the point
+ * score AFTER the point ({p1, p2}); `sets` / `games` are the running match
+ * score in the same layout as {@link Score} — `games` is player-major. `ts`
+ * is the CAPTURE time (ISO-8601, UTC), when we committed the point — not when
+ * it was played.
+ */
+export interface LivePoint extends Extensible {
+  seq?: number;
+  set?: number;
+  game?: number;
+  /** Point number within the game. */
+  number?: number;
+  tiebreak?: boolean;
+  server?: 1 | 2 | null;
+  winner?: 1 | 2 | null;
+  /** The point score after this point, e.g. `{p1: '40', p2: '30'}` (numerals in a tiebreak). */
+  score?: { p1?: string | number; p2?: string | number } & Extensible;
+  /** `[sets_p1, sets_p2]`. */
+  sets?: number[];
+  /** Player-major, like {@link Score.games}. */
+  games?: number[][];
+  /** Capture time, ISO-8601 UTC. */
+  ts?: string | null;
+}
+
+/**
+ * A page of `/matches/{id}/points` — at most 500 points, oldest first.
+ *
+ * `last_seq` is the resume cursor: pass it back as `after_seq` while
+ * `has_more` is true (or let `iterateMatchPoints()` do it). `pbp_coverage`
+ * says what one row IS — `'point'` rows are individual points, `'game'` rows
+ * are game-grain commits (the feed's honest floor where per-point data never
+ * existed upstream). `quality: 'revised'` means at least one committed row was
+ * later corrected. `covers_from_start` states whether the tape begins at 0-0
+ * — it may be ABSENT (not false) on servers that predate the field, so treat
+ * `undefined`/`null` as "not stated", never as "no".
+ */
+export interface PointsPage extends Extensible {
+  match_id?: number;
+  pbp_coverage?: 'point' | 'game';
+  quality?: 'clean' | 'revised';
+  /** Absent or null = not stated (older server), NOT false. */
+  covers_from_start?: boolean | null;
+  points?: LivePoint[];
+  last_seq?: number;
+  has_more?: boolean;
+}
+
+/**
+ * A `point` frame from the live feeds — one committed {@link LivePoint},
+ * nested under `.point` exactly as `score` frames nest theirs under `.score`.
+ *
+ * Arrives on the native `/ws` feed when the subscription named
+ * `signals: ['points']`, and on the push feed's `point:*` channels
+ * (`PushStream` with `points: true`). Unlike score frames, point frames are
+ * NOT complete-state: each one is a distinct event, so a missed frame is a
+ * missed point — which is what `point.seq` (gapless) lets you detect, and
+ * what `PushStream`'s resume machinery repairs over REST.
+ */
+export interface PointUpdate extends Extensible {
+  type?: 'point';
+  match_id?: number;
+  point?: LivePoint;
+  pbp_coverage?: 'point' | 'game';
+  quality?: 'clean' | 'revised';
+}
+
 export type MatchStatus = 'live' | 'upcoming' | 'completed';
 
 /**
@@ -503,9 +578,14 @@ export interface ArchiveCareer extends Extensible {
  * Ranking system vocabulary of `/rankings`. Systems are never collapsed into a
  * single "rank" — they are not comparable. ATP/WTA and the ITF circuits carry
  * rank+points; `utr` carries a rating with null rank and points, because UTR
- * is a rating, not a ranking (and has no listing mode).
+ * is a rating, not a ranking (and has no listing mode); `elo` is our own
+ * surface-aware Elo rating. `elo` is NEVER implied: omitting `system` returns
+ * the published-ranking systems only, so Elo records appear exactly when you
+ * name `system: 'elo'`. The Elo LISTING (the leaderboard mode) additionally
+ * requires `tour` — Elo ratings are computed per tour and the two tables are
+ * not one leaderboard.
  */
-export type RankingSystem = 'atp' | 'wta' | 'itf_jt' | 'itf_mt' | 'itf_wt' | 'utr';
+export type RankingSystem = 'atp' | 'wta' | 'itf_jt' | 'itf_mt' | 'itf_wt' | 'utr' | 'elo';
 
 /**
  * One ranking record in force at the requested instant — the newest record
