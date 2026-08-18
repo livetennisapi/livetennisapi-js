@@ -770,3 +770,176 @@ describe('PushStream point feed', () => {
     expect(calls.filter((url) => url.includes('/ws-token'))).toHaveLength(1);
   });
 });
+
+/** A `/ws-token` mint body whose vocabulary DOES advertise the signal channels. */
+const signalsMintBody = () => ({
+  token: 'jwt-signals',
+  expires_in: 3600,
+  ws_url: 'wss://push.example/connection/websocket',
+  channels: {
+    match: 'match:{match_id}',
+    slate: 'slate:all',
+    signal_match: 'signal:match:{match_id}',
+    signal_slate: 'signal:slate',
+  },
+});
+
+describe('PushStream signal feed', () => {
+  it('signals: true subscribes the signal slate from the mint vocabulary', async () => {
+    const { fetchImpl } = installMintFetch([{ body: signalsMintBody() }]);
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'signal:slate': [{ type: 'break_point', match_id: 9 }] },
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', signals: true, fetch: fetchImpl });
+    const [frame] = await collect(stream, 1);
+    expect(frame!.type).toBe('break_point');
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['slate:all', 'signal:slate']);
+  });
+
+  it('signals: true subscribes one signal channel per match, using the minted template', async () => {
+    const { fetchImpl } = installMintFetch([{ body: signalsMintBody() }]);
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'signal:match:7': [{ type: 'break_point', match_id: 7 }] },
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', matches: [7], signals: true, fetch: fetchImpl });
+    await collect(stream, 1);
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['match:7', 'signal:match:7']);
+  });
+
+  it('signals stay off by default — an advertised signal vocabulary is never subscribed unasked', async () => {
+    const { fetchImpl } = installMintFetch([{ body: signalsMintBody() }]);
+    const { sent } = installMockPushServer({ frames: [{ type: 'score', match_id: 1 }] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl });
+    await collect(stream, 1);
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['slate:all']);
+  });
+
+  it('refuses loudly when the mint does not advertise the signal channels — fatal, no re-mint', async () => {
+    // An unadvertised vocabulary is the server's honest refusal (the signal
+    // feed is off). Subscribing a guessed channel name would turn that
+    // refusal into a silent empty feed.
+    const { fetchImpl, calls } = installMintFetch(); // default mint: no signal channels
+    installMockPushServer();
+    const stream = new PushStream({ apiKey: 'twjp_test', signals: true, fetch: fetchImpl }); // default autoReconnect
+    const err = await collect(stream, 1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceUnavailable);
+    expect(String((err as Error).message)).toContain('signal');
+    expect(calls).toHaveLength(1); // fatal — never re-minted
+  });
+
+  it('passes every signal kind through verbatim, in order — break_point, its result, divergence', async () => {
+    // The exact event shapes the server publishes (the same frames the
+    // native feed's `signals` option delivers), untouched by any resume or
+    // dedup machinery — signals have no seq.
+    const wires = [
+      {
+        type: 'break_point',
+        match_id: 18953,
+        server: 1,
+        returner: 2,
+        break_points: 2,
+        set: '1-1',
+        game: '3-4',
+        point: '15-40',
+        win_probability_p1: 0.58,
+        prob_swing: 0.14,
+        server_side_favoured: true,
+        ts: '2026-08-18T12:00:00Z',
+      },
+      {
+        type: 'break_point_result',
+        match_id: 18953,
+        server: 1,
+        outcome: 'broken',
+        win_probability_p1_after: 0.41,
+        ts: '2026-08-18T12:01:30Z',
+      },
+      {
+        type: 'divergence',
+        match_id: 18953,
+        model_prob: 0.62,
+        market_prob: 0.51,
+        gap: 0.11,
+        direction: 'p1',
+        price_source: 'polymarket',
+        ts: '2026-08-18T12:02:00Z',
+      },
+    ];
+    const { fetchImpl } = installMintFetch([{ body: signalsMintBody() }]);
+    installMockPushServer({ framesByChannel: { 'signal:match:18953': wires } });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      matches: [18953],
+      signals: true,
+      fetch: fetchImpl,
+    });
+    const got = await collect(stream, 3);
+    expect(got).toEqual(wires);
+  });
+
+  it('signals: true triggers no REST traffic — events have no resume', async () => {
+    const { fetchImpl, calls } = installMintFetch([{ body: signalsMintBody() }]);
+    installMockPushServer({
+      framesByChannel: {
+        'signal:slate': [
+          { type: 'break_point', match_id: 5 },
+          { type: 'break_point_result', match_id: 5, outcome: 'held' },
+        ],
+      },
+    });
+    const stream = new PushStream({ apiKey: 'twjp_test', signals: true, fetch: fetchImpl });
+    const got = await collect(stream, 2);
+    expect(got.map((f) => f.type)).toEqual(['break_point', 'break_point_result']);
+    expect(calls).toHaveLength(1); // the mint only — no catch-up, no back-fill
+  });
+
+  it('signals: true composes with points: true — both families subscribed alongside the slate', async () => {
+    const { fetchImpl } = installPointsFetch();
+    // installPointsFetch advertises the point channels; graft the signal
+    // vocabulary onto its mint by wrapping the fetch.
+    const wrapped = (async (url: unknown, init?: unknown) => {
+      const res = await (fetchImpl as (u: unknown, i?: unknown) => Promise<Response>)(url, init);
+      if (!String(url).includes('/ws-token')) return res;
+      const body = (await res.json()) as { channels: Record<string, string> };
+      body.channels.signal_match = 'signal:match:{match_id}';
+      body.channels.signal_slate = 'signal:slate';
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof globalThis.fetch;
+    const { sent } = installMockPushServer({
+      framesByChannel: { 'signal:match:7': [{ type: 'break_point', match_id: 7 }] },
+    });
+    const stream = new PushStream({
+      apiKey: 'twjp_test',
+      matches: [7],
+      points: true,
+      pointsResume: false,
+      signals: true,
+      fetch: wrapped,
+    });
+    await collect(stream, 1);
+
+    const subscribes = sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((msg) => msg.subscribe)
+      .map((msg) => (msg.subscribe as { channel: string }).channel);
+    expect(subscribes).toEqual(['match:7', 'point:match:7', 'signal:match:7']);
+  });
+});

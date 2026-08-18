@@ -28,6 +28,16 @@
  * grant it; the `channels` option remains the verbatim escape hatch for
  * families newer than this SDK.
  *
+ * The signal families ride their own channels too (`signal:match:{id}` /
+ * `signal:slate`) — pass `signals: true` and the stream subscribes them the
+ * same vocabulary-first way. The frames are the exact events the native
+ * feed's `signals` option delivers: `break_point` / `break_point_result`
+ * ({@link BreakPoint} / {@link BreakPointResult}) and, where the server's
+ * divergence flag is on, `divergence` ({@link Divergence}). Signals are
+ * emitted when they occur and have no replay — a client that subscribes
+ * mid-break-point does not receive the onset — so there is no resume
+ * machinery for them, by design.
+ *
  * Score frames are complete-state and best-effort: a missed frame
  * self-corrects on the next one, so there is no catch-up to do. POINT frames
  * are events — a missed frame is a missed point — so with `points: true` the
@@ -59,7 +69,14 @@ import {
   Unauthorized,
   UpgradeRequired,
 } from './errors.js';
-import type { PointUpdate, PushFrame, WsToken } from './types.js';
+import type {
+  BreakPoint,
+  BreakPointResult,
+  Divergence,
+  PointUpdate,
+  PushFrame,
+  WsToken,
+} from './types.js';
 import { resolveWebSocket, type AnySocket } from './ws.js';
 
 /** How long the connect + subscribe handshake may take before we give up. */
@@ -195,6 +212,24 @@ export interface PushStreamOptions {
    * fires; the callback is observability, not a request to act.
    */
   onGap?: (matchId: number, expectedSeq: number, gotSeq: number) => void;
+  /**
+   * Also subscribe the signal channels: `signal:match:{id}` per requested
+   * match, or the whole signal slate when no `matches` were named — resolved
+   * from the `/ws-token` mint's OWN advertised vocabulary, never guessed,
+   * exactly like `points`. When the mint does not advertise the signal
+   * channels the stream throws `ServiceUnavailable` instead of subscribing
+   * blind: an unadvertised vocabulary is the server's honest refusal (the
+   * signal gate is off), not something a retry can fix.
+   *
+   * The frames are the exact events the native feed's `signals` option
+   * delivers: `break_point` ({@link BreakPoint}), `break_point_result`
+   * ({@link BreakPointResult}) and — where the server's divergence flag is on
+   * — `divergence` ({@link Divergence}). Signals are events with no replay
+   * and no `seq`: they are emitted when they occur, so a client that
+   * subscribes mid-break-point does not receive the onset, and there is no
+   * resume machinery for them (nothing like `pointsResume`), by design.
+   */
+  signals?: boolean;
   autoReconnect?: boolean;
   /** 0 means retry forever. */
   maxReconnectAttempts?: number;
@@ -215,6 +250,7 @@ export class PushStream {
   readonly channels: string[];
   readonly points: boolean;
   readonly pointsResume: boolean;
+  readonly signals: boolean;
   readonly autoReconnect: boolean;
   readonly maxReconnectAttempts: number;
   readonly timeout: number;
@@ -258,6 +294,7 @@ export class PushStream {
     this.channels = (options.channels ?? []).filter(Boolean);
     this.points = options.points ?? false;
     this.pointsResume = this.points && (options.pointsResume ?? true);
+    this.signals = options.signals ?? false;
     this.onGap = options.onGap;
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
@@ -306,8 +343,9 @@ export class PushStream {
    * The channels to subscribe, from the mint's own channel vocabulary: one
    * channel per requested match id, plus any extra `channels` names verbatim,
    * or the whole live slate when neither was given — plus, with
-   * `points: true`, the point channels. The server's templates win over the
-   * hardcoded fallbacks so a renamed channel family never strands this client.
+   * `points: true`, the point channels, and with `signals: true`, the signal
+   * channels. The server's templates win over the hardcoded fallbacks so a
+   * renamed channel family never strands this client.
    */
   private channelsFor(channels: WsToken['channels']): string[] {
     const names: string[] = [];
@@ -318,6 +356,7 @@ export class PushStream {
     names.push(...this.channels);
     if (!names.length) names.push(typeof channels?.slate === 'string' ? channels.slate : 'slate:all');
     if (this.points) names.push(...this.pointChannelsFor(channels));
+    if (this.signals) names.push(...this.signalChannelsFor(channels));
     // Dedupe: subscribing one channel twice on a single connection (a
     // duplicated match id, or `points: true` combined with the legacy
     // `channels: ['point:slate']` escape hatch) is a server-side reply ERROR
@@ -343,6 +382,32 @@ export class PushStream {
         'points: true, but the ws-token mint did not advertise the point channels — ' +
           'the point feed is not available to this key (the server has the point feed ' +
           'disabled, or the plan does not include points)',
+        { status: 0 },
+      );
+    }
+    if (this.matches.length) {
+      return this.matches.map((id) => wanted.replace(/\{[^{}]*\}/, String(id)));
+    }
+    return [wanted];
+  }
+
+  /**
+   * The signal channels, resolved ONLY from the mint's advertised vocabulary
+   * — the same rule as the point channels, for the same reason. A mint that
+   * does not advertise `signal_match` / `signal_slate` is the server's honest
+   * refusal (the signal gate is off); subscribing a guessed name would turn
+   * that refusal into a silent empty feed, so refuse loudly instead — and
+   * fatally, because a fresh mint from the same key re-fails identically.
+   */
+  private signalChannelsFor(channels: WsToken['channels']): string[] {
+    const template = typeof channels?.signal_match === 'string' ? channels.signal_match : undefined;
+    const slate = typeof channels?.signal_slate === 'string' ? channels.signal_slate : undefined;
+    const wanted = this.matches.length ? template : slate;
+    if (!wanted) {
+      throw new ServiceUnavailable(
+        'signals: true, but the ws-token mint did not advertise the signal channels — ' +
+          'the signal feed is not available to this key (the server has the signal ' +
+          'feed disabled)',
         { status: 0 },
       );
     }
@@ -466,10 +531,12 @@ export class PushStream {
    * Yield push-feed publications until the stream is closed.
    *
    * Frames come as {@link PushFrame} — `score` frames (the exact
-   * `ScoreUpdate` shape the native feed sends) and, with `points: true`,
-   * `point` frames ({@link PointUpdate}), including the REST-fetched ones the
-   * resume machinery replays after an outage. Narrow on `frame.type` and
-   * ignore kinds you do not handle.
+   * `ScoreUpdate` shape the native feed sends); with `points: true`, `point`
+   * frames ({@link PointUpdate}), including the REST-fetched ones the resume
+   * machinery replays after an outage; and with `signals: true`, the signal
+   * events (`break_point` / `break_point_result` / `divergence`), verbatim as
+   * the native feed sends them. Narrow on `frame.type` and ignore kinds you
+   * do not handle.
    */
   async *listen(): AsyncGenerator<PushFrame, void, unknown> {
     const WebSocketImpl = await resolveWebSocket();

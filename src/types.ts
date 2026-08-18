@@ -264,6 +264,30 @@ export interface BreakPointResult extends Extensible {
 }
 
 /**
+ * A `divergence` frame — the model and the match-winner market disagree
+ * beyond the server's threshold, and have for its dwell window.
+ *
+ * `direction` is the side the MODEL rates above the market; `gap` is the
+ * absolute model-minus-market probability difference (`model_prob` and
+ * `market_prob` are p1's win probability from each source). `price_source`
+ * names the public market kind the price came from. Emitted on the push
+ * feed's `signal:*` channels (`PushStream` with `signals: true`) where the
+ * server's divergence flag is on — an event with no replay, like the
+ * break-point signals. ULTRA-only.
+ */
+export interface Divergence extends Extensible {
+  type?: 'divergence';
+  match_id?: number;
+  model_prob?: number;
+  market_prob?: number;
+  gap?: number;
+  /** The side the model rates ABOVE the market. */
+  direction?: 'p1' | 'p2';
+  price_source?: string | null;
+  ts?: string | null;
+}
+
+/**
  * Any frame the live stream may yield. `score` frames arrive always; the
  * break and point frames only when their signal was requested
  * (`signals: ['break_point']` / `['points']`). Narrow on the `type` field.
@@ -273,14 +297,16 @@ export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult | PointUpd
 /**
  * A publication from the push feed (`PushStream`).
  *
- * Today the subscribed score channels carry `score` frames only — the exact
+ * The subscribed score channels carry `score` frames — the exact
  * {@link ScoreUpdate} shape the native feed sends, payload nested under
  * `.score` with the model fields inside it. Frames are dispatched by their
  * `type`, so a new frame kind published on a SUBSCRIBED channel arrives with
  * its own `type` value: narrow on `type` and ignore kinds you do not handle.
  * New channel families are not automatic — the point feed lives on its own
- * `point:*` channels, which `PushStream` subscribes only when they are named
- * via its `channels` option.
+ * `point:*` channels ({@link PointUpdate} frames, `points: true`) and the
+ * signal families on their `signal:*` channels ({@link BreakPoint} /
+ * {@link BreakPointResult} / {@link Divergence} frames, `signals: true`);
+ * the `channels` option subscribes families newer than this SDK by name.
  */
 export interface PushFrame extends Extensible {
   type?: string;
@@ -1133,14 +1159,20 @@ export interface WsToken extends Extensible {
    * Channel vocabulary, e.g. `{ match: 'match:{id}', slate: 'slate:all' }`.
    * `points`-entitled keys may additionally be granted the point-feed
    * channels (`point_match` / `point_slate`) when the server has the point
-   * feed enabled — `PushStream` does not subscribe those on its own; pass
-   * the resolved names via its `channels` option (or use your own client).
+   * feed enabled, and every key the signal channels (`signal_match` /
+   * `signal_slate`) when the server has the signal feed enabled. A channel
+   * name in this response is a promise that subscribing to it is useful — an
+   * absent family is the server's honest refusal, which is why `PushStream`
+   * (`points: true` / `signals: true`) resolves the names from here and
+   * never guesses them.
    */
   channels?: {
     match?: string;
     slate?: string;
     point_match?: string;
     point_slate?: string;
+    signal_match?: string;
+    signal_slate?: string;
   } & Extensible;
 }
 

@@ -67,12 +67,71 @@ $ npx livetennisapi watch --match 18953
 
 Two streamers, same score data, different transports:
 
-- **`LiveScoreStream`** — the native `/ws` feed. The quickest start, and the only
-  one carrying the opt-in break-point signal frames.
 - **`PushStream`** — the high-fan-out push feed, **recommended for continuous /
   production streaming**: no shared connection ceiling, built for scale. Score
   frames — plus, with `points: true`, the live point feed with built-in REST
-  resume.
+  resume, and, with `signals: true`, the signal events (break points and
+  model/market divergence).
+- **`LiveScoreStream`** — the native `/ws` feed. One plain WebSocket, but it
+  rides shared, capacity-capped infrastructure — keep it for short-lived
+  tooling and prefer `PushStream` for anything long-running.
+
+### Push streamer (`PushStream`) — start here
+
+The push feed rides a high-fan-out push endpoint (Centrifugo). The tiny
+protocol subset is built into this package, so **no extra dependency** and the
+same ergonomics as the native streamer:
+
+```ts
+import { PushStream } from 'livetennisapi';
+
+const stream = new PushStream({ apiKey: 'twjp_…' });          // every live match
+// …or follow specific matches: new PushStream({ apiKey, matches: [18953] })
+
+for await (const update of stream) {
+  if (update.type === 'score') console.log(update.match_id, update.score?.sets);
+}
+```
+
+Score frames nest their payload under `.score` — the same object the REST
+score reads return: `{ type: 'score', match_id, score: { sets, games, points,
+server, is_tiebreak, timestamp, win_probability_p1, danger } }`. A `null`
+model field means the model had no output for that state, not a missing
+feature. Score frames are complete-state and best-effort: a missed frame
+self-corrects on the next one, so there is nothing to replay. The stream
+mints a short-lived token via `getWsToken()` before every connection (a fresh
+one on every reconnect), reconnects with exponential backoff, and
+re-subscribes — and throws the SDK's normal errors instead of retrying a bad
+key, an insufficient tier (`UpgradeRequired`, the feed is ULTRA) or a
+disabled feed. An invalid connect token (the server closes the socket with
+code 3500/3501, never a reply error) surfaces as `Unauthorized` — not an
+endless reconnect — and a silently-dead connection is torn down and
+re-established when the server's advertised ping cadence (~25s) goes quiet
+for ~2 intervals.
+
+Frames are dispatched by their `type`, so a new frame kind published on a
+subscribed channel arrives without a client update. New channel *families* do
+need naming: the point feed lives on its own channels (`point:match:{id}` /
+`point:slate`) — pass `points: true` (the point-feed section below) — and the
+signal families on theirs (`signal:match:{id}` / `signal:slate`) — pass
+`signals: true` (the "Signal events" section below). Both are subscribed from the `/ws-token`
+mint's **own advertised vocabulary**, never guessed; the `channels: […]`
+option remains the verbatim escape hatch for families newer than this SDK.
+
+Bringing your own Centrifugo-protocol client instead? Mint the raw token
+yourself:
+
+```ts
+const { token, ws_url, channels } = await client.getWsToken();
+// channels.slate === 'slate:all', channels.match === 'match:{match_id}'
+// Mint a fresh token on every reconnect — never reuse one.
+```
+
+### Native streamer (`LiveScoreStream`)
+
+The native `/ws` feed carries the same score frames over one plain WebSocket —
+but it is shared, capacity-capped infrastructure (a concurrent-connection
+ceiling per key and per server), so keep it for short-lived tooling:
 
 ```ts
 import { LiveScoreStream } from 'livetennisapi';
@@ -84,10 +143,6 @@ for await (const update of stream) {
 }
 ```
 
-Score frames nest their payload under `.score` — the same object the REST
-score reads return: `{ type: 'score', match_id, score: { sets, games, points,
-server, is_tiebreak, timestamp, win_probability_p1, danger } }`.
-
 Reconnects with exponential backoff and re-subscribes automatically. Heartbeats are
 consumed internally, so you only see real score changes. It deliberately does **not**
 reconnect on a bad key or insufficient tier — those throw immediately instead of
@@ -95,12 +150,12 @@ retrying forever.
 
 > On Node 22+ the global `WebSocket` is used. On Node 18–20, `npm install ws`.
 
-### Break-point signals
+### Signal events: break points and divergence
 
-Opt in with `signals: ['break_point']` to also receive the headline break-point
-feed. The stream then yields a `BreakPoint` the moment a break point arises and a
-`BreakPointResult` when it resolves, alongside the usual `ScoreUpdate` — narrow on
-`frame.type`:
+Signals are derived events, delivered the moment they occur. On the native
+feed, opt in with `signals: ['break_point']`: the stream yields a `BreakPoint`
+the moment a break point arises and a `BreakPointResult` when it resolves,
+alongside the usual `ScoreUpdate` — narrow on `frame.type`:
 
 ```ts
 import { LiveScoreStream } from 'livetennisapi';
@@ -118,14 +173,34 @@ for await (const frame of stream) {
 }
 ```
 
-With no `signals` the stream behaves exactly as before — score frames only. Both
-the feed and its fields are ULTRA-only. A runnable example lives in
-[`livetennisapi-starter-node`](https://github.com/livetennisapi/livetennisapi-starter-node).
+On the push feed, pass `signals: true`: the stream subscribes the signal
+channels (`signal:match:{id}` per requested match, or the signal slate) from
+the mint's own advertised vocabulary — an unadvertised vocabulary means the
+server's signal feed is off and throws `ServiceUnavailable`, never a silent
+empty feed. The frames are the same events, verbatim: `break_point`,
+`break_point_result`, and — where the server's divergence flag is on —
+`divergence` (a `Divergence`: the model and the match-winner market
+disagreeing beyond the server's threshold, `direction` naming the side the
+model rates above the market).
 
-Score frames carry the model fields — `win_probability_p1` and `danger` —
-inside `.score`, just like the REST score reads (the whole feed is ULTRA). A
-`null` there means the model had no output for that state, not a missing
-feature.
+```ts
+const stream = new PushStream({ apiKey: 'twjp_…', signals: true });
+
+for await (const frame of stream) {
+  if (frame.type === 'break_point') console.log('break point on', frame.match_id);
+  else if (frame.type === 'divergence') console.log(frame.match_id, frame.gap, frame.direction);
+}
+```
+
+Signals are events with no replay and no `seq`: a subscriber that joins
+mid-break-point does not receive the onset (a fresh **native** connection
+does re-announce in-progress break points; the push channels do not), and
+there is no resume machinery for them — unlike points, a missed signal is
+not recoverable over REST.
+
+With no `signals` either stream behaves exactly as before — score frames only.
+Both the feeds and their fields are ULTRA-only. A runnable example lives in
+[`livetennisapi-starter-node`](https://github.com/livetennisapi/livetennisapi-starter-node).
 
 ### The live point feed (ULTRA, server-gated)
 
@@ -190,57 +265,6 @@ first live frame arrives. Follow specific `matches` when that matters.
 Read the page honestly: `pbp_coverage: 'game'` rows are game-grain commits —
 the feed's floor where per-point data never existed upstream — and an absent
 `covers_from_start` means "not stated" (an older server), never "no".
-
-### Push streamer (`PushStream`) — for continuous / production streaming
-
-The second transport rides a high-fan-out push endpoint (Centrifugo) with no
-shared connection ceiling — prefer it for anything long-running. The tiny
-protocol subset is built into this package, so **no extra dependency** and the
-same ergonomics as the native streamer:
-
-```ts
-import { PushStream } from 'livetennisapi';
-
-const stream = new PushStream({ apiKey: 'twjp_…' });          // every live match
-// …or follow specific matches: new PushStream({ apiKey, matches: [18953] })
-
-for await (const update of stream) {
-  if (update.type === 'score') console.log(update.match_id, update.score?.sets);
-}
-```
-
-Score frames are byte-identical to the native feed's — payload nested under
-`.score`, `win_probability_p1` and `danger` inside it. Frames are
-complete-state and best-effort: a missed frame self-corrects on the next one,
-so there is nothing to replay. The stream mints a short-lived token via
-`getWsToken()` before every connection (a fresh one on every reconnect),
-reconnects with exponential backoff, and re-subscribes — and, like the native
-streamer, throws the SDK's normal errors instead of retrying a bad key, an
-insufficient tier (`UpgradeRequired`, the feed is ULTRA) or a disabled feed.
-An invalid connect token (the server closes the socket with code 3500/3501,
-never a reply error) surfaces as `Unauthorized` — not an endless reconnect —
-and a silently-dead connection is torn down and re-established when the
-server's advertised ping cadence (~25s) goes quiet for ~2 intervals.
-
-**Honest scope:** the subscribed score channels carry `score` frames only
-today — the break-point signal frames (`break_point` / `break_point_result`)
-exist only on the native `LiveScoreStream`. Frames are dispatched by their
-`type`, so a new frame kind published on a subscribed channel arrives without
-a client update. New channel *families* do need naming: the point feed lives
-on its own channels (`point:match:{id}` / `point:slate`, granted by the mint
-to `points`-entitled keys) — pass `points: true` and the stream subscribes
-them from the mint's own vocabulary with resume built in (see the point-feed
-section above); the `channels: […]` option remains the verbatim escape hatch
-for families newer than this SDK.
-
-Bringing your own Centrifugo-protocol client instead? Mint the raw token
-yourself:
-
-```ts
-const { token, ws_url, channels } = await client.getWsToken();
-// channels.slate === 'slate:all', channels.match === 'match:{match_id}'
-// Mint a fresh token on every reconnect — never reuse one.
-```
 
 ## Tiers
 
