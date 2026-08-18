@@ -3,6 +3,15 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.1] — 2026-08-18
+
+### Fixed
+- **Native `LiveScoreStream` no longer drops `divergence` frames.** The
+  server accepts `signals: ['divergence']` on the native feed, but the
+  stream's dispatch had no case for the frame type and silently discarded
+  every event. Divergence frames now yield (typed `Divergence`), and
+  `StreamFrame` includes `Divergence` in its union.
+
 ## [1.8.0] — 2026-08-18
 
 ### Added

@@ -289,10 +289,11 @@ export interface Divergence extends Extensible {
 
 /**
  * Any frame the live stream may yield. `score` frames arrive always; the
- * break and point frames only when their signal was requested
- * (`signals: ['break_point']` / `['points']`). Narrow on the `type` field.
+ * break, point and divergence frames only when their signal was requested
+ * (`signals: ['break_point']` / `['points']` / `['divergence']`). Narrow on
+ * the `type` field.
  */
-export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult | PointUpdate;
+export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult | PointUpdate | Divergence;
 
 /**
  * A publication from the push feed (`PushStream`).

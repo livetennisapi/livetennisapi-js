@@ -48,7 +48,7 @@ import {
   Unauthorized,
   UpgradeRequired,
 } from './errors.js';
-import type { BreakPoint, BreakPointResult, PointUpdate, ScoreUpdate, StreamFrame } from './types.js';
+import type { BreakPoint, BreakPointResult, Divergence, PointUpdate, ScoreUpdate, StreamFrame } from './types.js';
 
 /** The server drops the socket if the subscribe frame is late. */
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
@@ -302,6 +302,7 @@ export class LiveScoreStream {
             else if (frame.type === 'break_point') yield frame as BreakPoint;
             else if (frame.type === 'break_point_result') yield frame as BreakPointResult;
             else if (frame.type === 'point') yield frame as PointUpdate;
+            else if (frame.type === 'divergence') yield frame as Divergence;
             else if (frame.type === 'error') LiveScoreStream.raiseFrameError(frame);
             // 'ping' and 'subscribed' are protocol noise.
           }
