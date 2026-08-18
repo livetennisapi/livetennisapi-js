@@ -174,6 +174,19 @@ describe('LiveScoreStream frame dispatch', () => {
     expect(got[1]!.outcome).toBe('held');
   });
 
+  it('yields divergence frames when the divergence signal was requested — no longer silently dropped', async () => {
+    // Shape per the server's divergence radar output, published verbatim.
+    installMockWebSocket({
+      frames: [
+        { type: 'divergence', match_id: 7, model_prob: 0.61, market_prob: 0.52, gap: 0.09, direction: 1 },
+      ],
+    });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', signals: ['divergence'] });
+    const got = await collect(stream, 1);
+    expect(got[0]!.type).toBe('divergence');
+    expect(got[0]!.gap).toBe(0.09);
+  });
+
   it('yields point frames when the points signal was requested — no longer silently dropped', async () => {
     // The real point frame shape, verbatim: the committed point is NESTED
     // under `.point` exactly as score frames nest theirs under `.score`,
