@@ -56,6 +56,7 @@ export type {
   Coverage,
   CoverageBucket,
   CoveragePage,
+  Divergence,
   Draw,
   Extensible,
   Fixture,

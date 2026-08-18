@@ -3,6 +3,42 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] — 2026-08-18
+
+### Added
+- **`signals: true` on `PushStream` — the signal events, on the push feed.**
+  The push feed's signal channels (`signal:match:{id}` per requested match,
+  or `signal:slate`) carry the same derived events the native
+  `LiveScoreStream` delivers through its `signals` option: `break_point`
+  (`BreakPoint`) the moment a break point arises, `break_point_result`
+  (`BreakPointResult`) when it resolves, and — where the server's divergence
+  flag is on — `divergence` (the new `Divergence` type: model vs match-winner
+  market disagreeing beyond the server's threshold, `direction` naming the
+  side the model rates above the market). Channel names are resolved from the
+  `/ws-token` mint's **own advertised vocabulary** (`signal_match` /
+  `signal_slate`), exactly like `points: true` — an unadvertised vocabulary
+  is the server's honest refusal (the signal feed is off) and throws
+  `ServiceUnavailable` instead of subscribing a guessed name into a silent
+  empty feed. Signals are events with no replay and no `seq`: a subscriber
+  that joins mid-break-point does not receive the onset, and there is no
+  resume machinery for them (nothing like `pointsResume`) — unlike points, a
+  missed signal is not recoverable over REST. Frames arrive through the same
+  iterator, dispatched by `frame.type` as always.
+- **`Divergence`** — the new exported frame type; `WsToken.channels` gains
+  the optional `signal_match` / `signal_slate` vocabulary fields.
+
+### Changed
+- **README: `PushStream` is now the first streaming example.** The push feed
+  is the recommended transport for continuous / production streaming; the
+  native `/ws` feed is documented second, with its shared-capacity ceiling
+  stated. Documentation only — no behavioural change to either streamer.
+
+### Notes
+- **Fully backwards compatible.** `signals` defaults to `false`; with it
+  omitted `PushStream` subscribes exactly the channels it did before. Every
+  addition is a new optional option, a new optional field, or a new exported
+  type.
+
 ## [1.7.0] — 2026-08-18
 
 ### Added
