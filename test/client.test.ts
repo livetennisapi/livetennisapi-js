@@ -706,4 +706,20 @@ describe('forward compatibility', () => {
     expect(match.id).toBe(1);
     expect(match.a_field_from_next_year).toEqual({ nested: true });
   });
+
+  it('types event_status_updated_at (added 2026-08-19)', async () => {
+    const stamped = clientReturning(
+      json(200, { id: 9, event_status: 'Retired', event_status_updated_at: '2026-08-19T09:15:00Z' }),
+    );
+    const match = await stamped.client.getMatch(9);
+    // Typed access — `string | null | undefined`, not the index signature.
+    const at: string | null | undefined = match.event_status_updated_at;
+    expect(at).toBe('2026-08-19T09:15:00Z');
+
+    // Never backfilled: a match from before the field existed omits it (or
+    // sends null), and neither is ever coerced to a guess.
+    const bare = clientReturning(json(200, { id: 10 }));
+    const older = await bare.client.getMatch(10);
+    expect(older.event_status_updated_at).toBeUndefined();
+  });
 });
