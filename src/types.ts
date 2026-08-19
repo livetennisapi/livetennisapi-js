@@ -182,6 +182,15 @@ export interface Match extends Extensible {
    * logic on this, never on string-matching the tournament or round.
    */
   event_status?: string | null;
+  /**
+   * The instant the current `event_status` was recorded (ISO 8601 UTC, added
+   * 2026-08-19). Bumps only when the value changes — a re-read of the same
+   * status never moves it — and a clear back to null bumps it too. Null
+   * while the status has never changed since the field was introduced:
+   * never backfilled, never guessed. The same value rides on the `status`
+   * push frame.
+   */
+  event_status_updated_at?: string | null;
   is_doubles?: boolean;
   /**
    * `'singles'` | `'doubles'` | null — three-valued on purpose. Null means
