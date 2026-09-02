@@ -722,4 +722,36 @@ describe('forward compatibility', () => {
     const older = await bare.client.getMatch(10);
     expect(older.event_status_updated_at).toBeUndefined();
   });
+
+  it('types has_analysis and has_market (added 2026-09-02)', async () => {
+    // Present, true: a match the model has a thesis for and a market maps to.
+    const covered = clientReturning(json(200, { id: 11, has_analysis: true, has_market: true }));
+    const rich = await covered.client.getMatch(11);
+    // Typed access — `boolean | undefined`, not the index signature.
+    const a: boolean | undefined = rich.has_analysis;
+    const m: boolean | undefined = rich.has_market;
+    expect(a).toBe(true);
+    expect(m).toBe(true);
+
+    // Present, false: the same fact the per-match endpoints 404 about
+    // (`no_analysis` / `no_market`), answered on the row instead.
+    const uncovered = clientReturning(json(200, { id: 12, has_analysis: false, has_market: false }));
+    const bare = await uncovered.client.getMatch(12);
+    expect(bare.has_analysis).toBe(false);
+    expect(bare.has_market).toBe(false);
+
+    // Absent: an older server omits both, and neither is coerced to a guess.
+    const older = clientReturning(json(200, { id: 13 }));
+    const legacy = await older.client.getMatch(13);
+    expect(legacy.has_analysis).toBeUndefined();
+    expect(legacy.has_market).toBeUndefined();
+
+    // The list carries the same two booleans on every row.
+    const listed = clientReturning(
+      json(200, { data: [{ id: 14, has_analysis: true, has_market: false }], meta: { limit: 1, offset: 0, count: 1 } }),
+    );
+    const page = await listed.client.listMatches({ status: 'live' });
+    expect(page.data[0].has_analysis).toBe(true);
+    expect(page.data[0].has_market).toBe(false);
+  });
 });

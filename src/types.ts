@@ -211,6 +211,20 @@ export interface Match extends Extensible {
    * absent means "not a withdrawal, or no evidence", never a guess.
    */
   withdrew?: 1 | 2;
+  /**
+   * Whether a model thesis or profile exists for this match (added
+   * 2026-09-02). On every list row and the detail, every tier. Filter the
+   * slate on this before calling `getMatchAnalysis()`, which answers
+   * `404 no_analysis` about the same fact. Absent when talking to an older
+   * server, never guessed.
+   */
+  has_analysis?: boolean;
+  /**
+   * Whether a match-winner market is mapped to this match (added
+   * 2026-09-02, every tier). Same role for `getMarketPrices()`, which
+   * answers `404 no_market`. Absent when talking to an older server.
+   */
+  has_market?: boolean;
   market?: Market | null;
   analysis?: Analysis | null;
 }

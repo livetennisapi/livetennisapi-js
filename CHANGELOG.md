@@ -3,6 +3,22 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-09-02
+
+### Added
+- **`Match.has_analysis` and `Match.has_market`** — two optional booleans on
+  every row of `listMatches()` and on `getMatch()`, every tier (server-side
+  since 2026-09-02). `has_analysis` says whether a model thesis or profile
+  exists for the match — the same fact `getMatchAnalysis()` answers
+  `404 no_analysis` about — and `has_market` whether a match-winner market is
+  mapped to it (`getMarketPrices()`, `404 no_market`). Filter the slate on
+  them in one call instead of collecting one 404 per match. Absent (never
+  guessed) when talking to an older server; both were already reachable
+  through the `Extensible` index signature, now typed. The 404s themselves
+  are unchanged in status; their body now says which absence it is —
+  `not_found` for an unknown id, `no_analysis` / `no_market` for a real match
+  we hold nothing for — readable through `APIStatusError.errorCode`.
+
 ## [1.8.1] — 2026-08-18
 
 ### Fixed
