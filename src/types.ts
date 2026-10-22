@@ -1299,14 +1299,20 @@ export interface PlayerRecentMatch extends Extensible {
   surface?: string | null;
   indoor?: boolean | null;
   level?: string | null;
-  opponent?: { id?: number; name?: string | null };
+  /**
+   * The other side of the match. `name` is null when the opponent is not on
+   * the roster read. The whole object is null when the match row holds no
+   * opponent id.
+   */
+  opponent?: { id?: number; name?: string | null } | null;
   won?: boolean;
   outcome?: 'completed' | 'retired' | 'walkover' | 'default';
   /**
    * The final score turned round to this player: `sets` [player, opponent],
    * `games` [[player per set], [opponent per set]]. Null when no score row is held.
+   * The games values are passed through as stored, so each one may be null.
    */
-  score?: { sets?: Array<number | null>; games?: number[][] } | null;
+  score?: { sets?: Array<number | null>; games?: Array<Array<number | null>> } | null;
 }
 
 /** The results-based record of `getPlayerStats()`. PRO. */

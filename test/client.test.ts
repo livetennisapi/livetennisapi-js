@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { PlayerRecentMatch } from '../src/index.js';
+
 import {
   AbuseThrottled,
   BadRequest,
@@ -794,6 +796,14 @@ describe('getPlayerStats', () => {
     expect(stats.records?.overall?.win_pct).toBe(70.0);
     expect(stats.records?.sets?.tiebreaks?.win_pct).toBeNull();
     expect(stats.serve_return).toBeUndefined();
+  });
+
+  it('types a null opponent, as the API sends when the row has no opponent id', async () => {
+    // The annotation is the check: before opponent allowed null, tsc refused it.
+    const row: PlayerRecentMatch = { match_id: 2, opponent: null, won: true, outcome: 'walkover', score: null };
+    const { client } = clientReturning(json(200, { records: { recent: [row] } }));
+    const stats = await client.getPlayerStats(7);
+    expect(stats.records?.recent?.[0]?.opponent).toBeNull();
   });
 
   it('sends no query string when no filters are given', async () => {

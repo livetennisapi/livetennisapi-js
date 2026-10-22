@@ -14,6 +14,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   matches. **ULTRA** adds `serve_return`, summed serve and return statistics.
   A 403 names PRO. New exported types: `PlayerStats`, `PlayerRecords`,
   `PlayerWinLoss` and their parts.
+  `PlayerRecentMatch.opponent` is typed `| null`, as the API sends null when
+  the match row holds no opponent id, and each games value may be null.
 - **`Player.height_cm` and `Player.doubles_ranking`** on `getPlayer()`. Both
   are on paid tiers and null on a FREE key.
 
