@@ -3,6 +3,20 @@
 All notable changes are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`getPlayerStats(playerId, { from, to, surface, level, last })`** for
+  `GET /players/{playerId}/stats`. It returns one player's record over our
+  completed singles matches, 2023 onward. **PRO** gets `records`: W/L
+  overall, over the last 12 months and by surface, venue, level and season,
+  plus tiebreaks, deciding sets, first-set splits, withdrawals and recent
+  matches. **ULTRA** adds `serve_return`, summed serve and return statistics.
+  A 403 names PRO. New exported types: `PlayerStats`, `PlayerRecords`,
+  `PlayerWinLoss` and their parts.
+- **`Player.height_cm` and `Player.doubles_ranking`** on `getPlayer()`. Both
+  are on paid tiers and null on a FREE key.
+
 ## [1.9.0] — 2026-09-02
 
 ### Added

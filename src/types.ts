@@ -62,9 +62,29 @@ export interface Player extends Extensible {
   hand?: 'R' | 'L' | null;
   backhand?: 1 | 2 | null;
   birthday?: string | null;
+  /**
+   * Height in cm from the results archive's record of the same person.
+   * Single-player read only; paid tiers, null on a FREE key. Never inferred.
+   */
+  height_cm?: number | null;
+  /**
+   * Current position on the official ATP/WTA doubles table. Single-player read
+   * only; paid tiers, null on a FREE key, and null when the player is off the
+   * table or was last seen there more than 21 days ago. Never copied into
+   * `ranking`, which stays the singles position.
+   */
+  doubles_ranking?: PlayerDoublesRanking | null;
   is_doubles_team?: boolean;
   /** Populated by the single-player endpoint only. */
   stats?: { ratings?: unknown; season?: unknown } | null;
+}
+
+/** `Player.doubles_ranking`: the official doubles table position. */
+export interface PlayerDoublesRanking extends Extensible {
+  rank?: number;
+  points?: number | null;
+  /** UTC date our weekly refresh last found the player on the table. */
+  observed_on?: string;
 }
 
 /** One price tick. `side` is 1 for p1's outcome, 2 for p2's. */
@@ -1235,4 +1255,138 @@ export function formatScore(score: Score | null | undefined): string {
     parts.push(`(${score.points[0]}-${score.points[1]})`);
   }
   return parts.join(' ') || '-';
+}
+
+/** A W/L block. `win_pct` is percent with one decimal; null when `matches` is 0. */
+export interface PlayerWinLoss extends Extensible {
+  matches?: number;
+  wins?: number;
+  losses?: number;
+  win_pct?: number | null;
+}
+
+/** Tiebreaks / deciding sets: how many were played, won and lost. */
+export interface PlayerPlayedRecord extends Extensible {
+  played?: number;
+  won?: number;
+  lost?: number;
+  win_pct?: number | null;
+}
+
+/** After winning / losing the first set. */
+export interface PlayerSplitRecord extends Extensible {
+  matches?: number;
+  won?: number;
+  lost?: number;
+  win_pct?: number | null;
+}
+
+/** Matches this player did not finish (`given`) and the opponent did not (`received`). */
+export interface PlayerWithdrawalCount extends Extensible {
+  given?: number;
+  received?: number;
+}
+
+/** One of the last N matches in `records.recent`, newest first. */
+export interface PlayerRecentMatch extends Extensible {
+  match_id?: number;
+  date?: string | null;
+  scheduled_time?: string | null;
+  tournament_id?: string | null;
+  tournament?: string | null;
+  round?: string | null;
+  round_code?: string | null;
+  surface?: string | null;
+  indoor?: boolean | null;
+  level?: string | null;
+  opponent?: { id?: number; name?: string | null };
+  won?: boolean;
+  outcome?: 'completed' | 'retired' | 'walkover' | 'default';
+  /**
+   * The final score turned round to this player: `sets` [player, opponent],
+   * `games` [[player per set], [opponent per set]]. Null when no score row is held.
+   */
+  score?: { sets?: Array<number | null>; games?: number[][] } | null;
+}
+
+/** The results-based record of `getPlayerStats()`. PRO. */
+export interface PlayerRecords extends Extensible {
+  overall?: PlayerWinLoss;
+  last_12_months?: PlayerWinLoss;
+  /** Keyed hard, clay, grass, unknown. */
+  by_surface?: Record<string, PlayerWinLoss>;
+  /** Keyed indoor, outdoor, unknown. */
+  by_venue?: Record<string, PlayerWinLoss>;
+  /** Keyed by the match tour (atp, wta, challenger, itf, juniors) or unknown. */
+  by_level?: Record<string, PlayerWinLoss>;
+  /** Keyed by the UTC calendar year of the scheduled start. */
+  by_season?: Record<string, PlayerWinLoss>;
+  /** Over completed matches whose final score is complete and legal. */
+  sets?: {
+    sample?: {
+      matches?: number;
+      excluded?: { retired?: number; walkover?: number; default?: number; score_incomplete?: number };
+    };
+    tiebreaks?: PlayerPlayedRecord;
+    deciding_sets?: PlayerPlayedRecord;
+    after_winning_first_set?: PlayerSplitRecord;
+    after_losing_first_set?: PlayerSplitRecord;
+    comebacks?: { matches_lost_a_set?: number; won?: number; win_pct?: number | null };
+    sets?: { won?: number; lost?: number; win_pct?: number | null };
+  };
+  withdrawals?: {
+    retired?: PlayerWithdrawalCount;
+    walkover?: PlayerWithdrawalCount;
+    default?: PlayerWithdrawalCount;
+  };
+  /** Matches in the window left out of every record, by reason. */
+  excluded?: { not_singles?: number; unresolved?: number; abandoned?: number; no_published_winner?: number };
+  recent?: PlayerRecentMatch[];
+}
+
+/** A sum of numerators over a sum of denominators; all null with `matches` 0 when no match carried it. */
+export interface PlayerStatRatio extends Extensible {
+  numerator?: number | null;
+  denominator?: number | null;
+  pct?: number | null;
+  matches?: number;
+}
+
+/** A summed count; `total` and `per_match` are null with `matches` 0 when no match carried it. */
+export interface PlayerStatCount extends Extensible {
+  total?: number | null;
+  matches?: number;
+  per_match?: number | null;
+}
+
+/** Measured per-match statistics summed over the window. ULTRA only; absent below. */
+export interface PlayerServeReturn extends Extensible {
+  matches?: number;
+  matches_with_stats?: number;
+  serve?: {
+    aces?: PlayerStatCount;
+    double_faults?: PlayerStatCount;
+    first_serve_in?: PlayerStatRatio;
+    first_serve_points_won?: PlayerStatRatio;
+    second_serve_points_won?: PlayerStatRatio;
+    service_games_won?: PlayerStatRatio;
+    break_points_saved?: PlayerStatRatio;
+  };
+  return?: {
+    first_serve_return_points_won?: PlayerStatRatio;
+    second_serve_return_points_won?: PlayerStatRatio;
+    return_games_won?: PlayerStatRatio;
+    break_points_converted?: PlayerStatRatio;
+  };
+}
+
+/** `GET /players/{playerId}/stats`. `records` is PRO; `serve_return` is ULTRA and absent below. */
+export interface PlayerStats extends Extensible {
+  player?: { id?: number; name?: string };
+  /** The window applied, UTC. */
+  window?: { from?: string; to?: string };
+  filters?: { surface?: string | null; level?: string | null; last?: number };
+  records?: PlayerRecords;
+  serve_return?: PlayerServeReturn;
+  meta?: { generated_at?: string; note?: string };
 }

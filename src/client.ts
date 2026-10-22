@@ -53,6 +53,7 @@ import type {
   Tournament,
   Page,
   Player,
+  PlayerStats,
   Score,
   WsToken,
 } from './types.js';
@@ -71,6 +72,8 @@ const MAX_LIMIT = 200;
 const TIER_REQUIREMENTS: ReadonlyArray<readonly [string, Tier]> = [
   ['/analysis', 'ULTRA'],
   ['/statistics', 'ULTRA'],
+  // `/players/{id}/stats` (PRO); `/stats` is not a substring of `/statistics`.
+  ['/stats', 'PRO'],
   ['/points', 'ULTRA'],
   // `/rally` also matches `/history/matches/{id}/rally`, so it must sit above
   // the BASIC `/history` marker.
@@ -396,6 +399,30 @@ export class LiveTennisAPI {
   /** One player's bio, ranking and cached stats. */
   getPlayer(playerId: number): Promise<Player> {
     return this.request(`/players/${playerId}`);
+  }
+
+  /**
+   * One player's record over our own completed singles matches (2023 onward).
+   * **PRO**; `serve_return` needs **ULTRA** and is absent below it.
+   *
+   * The default window is the 365 days ending now. `from` / `to` take an ISO
+   * date or a UTC instant; `surface` is hard, clay, grass or indoor (indoor =
+   * venue stated indoor, any surface); `level` is the match tour vocabulary;
+   * `last` (1–50, default 20) sets how many recent matches are listed. A
+   * percentage on an empty sample is null, never 0. A doubles-team id is a
+   * 400 `doubles_not_supported`. For 1968–2022 use `getArchiveCareer()`.
+   */
+  getPlayerStats(
+    playerId: number,
+    params: {
+      from?: string;
+      to?: string;
+      surface?: 'hard' | 'clay' | 'grass' | 'indoor';
+      level?: 'atp' | 'wta' | 'challenger' | 'itf' | 'juniors';
+      last?: number;
+    } = {},
+  ): Promise<PlayerStats> {
+    return this.request(`/players/${playerId}/stats`, params);
   }
 
   /** Match-winner market(s) for a match. **PRO.** */

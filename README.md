@@ -277,6 +277,7 @@ the feed's floor where per-point data never existed upstream — and an absent
 | `listArchiveMatches` `getArchiveMatch` `listArchivePlayers` `getArchiveCareer` `getH2H` (results archive · head-to-head) | — | ✅¹ | ✅ | ✅ |
 | `listMatchEvents` `listMarkets` `getMarketPrices` | — | — | ✅ | ✅ |
 | `listRankings` (rank-ordered listing) | — | — | ✅ | ✅ |
+| `getPlayerStats` (W/L and set-based record; `serve_return` needs ULTRA) | — | — | ✅ | ✅ |
 | `listHistoryPackages` `getHistoryPackage` (bulk downloads)² | — | — | ✅ | ✅ |
 | `listRankings` (per-player as-of records) | — | — | — | ✅ |
 | `getMatchStatistics` (in-play statistics) | — | — | — | ✅ |

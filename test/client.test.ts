@@ -118,6 +118,11 @@ describe('error mapping', () => {
     await expect(client.getMatchStatistics(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
   });
 
+  it('names PRO on a player stats 403', async () => {
+    const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
+    await expect(client.getPlayerStats(1)).rejects.toMatchObject({ requiredTier: 'PRO' });
+  });
+
   it('names ULTRA on a points 403', async () => {
     const { client } = clientReturning(json(403, { error: 'upgrade_required' }), { maxRetries: 0 });
     await expect(client.getMatchPoints(1)).rejects.toMatchObject({ requiredTier: 'ULTRA' });
@@ -753,5 +758,47 @@ describe('forward compatibility', () => {
     const page = await listed.client.listMatches({ status: 'live' });
     expect(page.data[0].has_analysis).toBe(true);
     expect(page.data[0].has_market).toBe(false);
+  });
+});
+
+describe('getPlayerStats', () => {
+  it('calls /players/{id}/stats with the window and filters', async () => {
+    const body = {
+      player: { id: 7, name: 'A Player' },
+      window: { from: '2025-01-01T00:00:00Z', to: '2025-12-31T23:59:59Z' },
+      filters: { surface: 'clay', level: 'atp', last: 5 },
+      records: {
+        overall: { matches: 10, wins: 7, losses: 3, win_pct: 70.0 },
+        sets: { tiebreaks: { played: 0, won: 0, lost: 0, win_pct: null } },
+        recent: [{ match_id: 1, won: true, outcome: 'completed', score: { sets: [2, 0], games: [[6, 6], [3, 4]] } }],
+      },
+      meta: { generated_at: '2026-10-22T00:00:00Z' },
+    };
+    const { client, calls } = clientReturning(json(200, body));
+    const stats = await client.getPlayerStats(7, {
+      from: '2025-01-01',
+      to: '2025-12-31',
+      surface: 'clay',
+      level: 'atp',
+      last: 5,
+    });
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe('/api/public/v1/players/7/stats');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      from: '2025-01-01',
+      to: '2025-12-31',
+      surface: 'clay',
+      level: 'atp',
+      last: '5',
+    });
+    expect(stats.records?.overall?.win_pct).toBe(70.0);
+    expect(stats.records?.sets?.tiebreaks?.win_pct).toBeNull();
+    expect(stats.serve_return).toBeUndefined();
+  });
+
+  it('sends no query string when no filters are given', async () => {
+    const { client, calls } = clientReturning(json(200, {}));
+    await client.getPlayerStats(7);
+    expect(calls[0]!.url).toBe(`${BASE}/players/7/stats`);
   });
 });
