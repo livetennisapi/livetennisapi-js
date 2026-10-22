@@ -5,6 +5,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-22
+
 ### Added
 - **`getPlayerStats(playerId, { from, to, surface, level, last })`** for
   `GET /players/{playerId}/stats`. It returns one player's record over our
