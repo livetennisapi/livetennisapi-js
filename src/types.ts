@@ -1369,6 +1369,11 @@ export interface PlayerStatCount extends Extensible {
 export interface PlayerServeReturn extends Extensible {
   matches?: number;
   matches_with_stats?: number;
+  /**
+   * Matches whose measured statistics are held but stop short of the final,
+   * or cannot be judged against it. Left out of every sum.
+   */
+  matches_incomplete?: number;
   serve?: {
     aces?: PlayerStatCount;
     double_faults?: PlayerStatCount;

@@ -5,6 +5,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-22
+
+### Fixed
+- `PlayerServeReturn.matches_incomplete` is now typed as `number`. It was
+  present at runtime but missing from the interface, so the index signature
+  made it `unknown`.
+
 ## [1.10.0] - 2026-10-22
 
 ### Added

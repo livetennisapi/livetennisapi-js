@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PlayerRecentMatch } from '../src/index.js';
+import type { PlayerRecentMatch, PlayerServeReturn } from '../src/index.js';
 
 import {
   AbuseThrottled,
@@ -804,6 +804,18 @@ describe('getPlayerStats', () => {
     const { client } = clientReturning(json(200, { records: { recent: [row] } }));
     const stats = await client.getPlayerStats(7);
     expect(stats.records?.recent?.[0]?.opponent).toBeNull();
+  });
+
+  it('types serve_return.matches_incomplete as a number', async () => {
+    // The annotation is the check: without the field on PlayerServeReturn the
+    // Extensible index signature makes it `unknown`, and tsc refuses this line.
+    const sr: PlayerServeReturn = { matches: 3, matches_with_stats: 2, matches_incomplete: 1 };
+    const n: number | undefined = sr.matches_incomplete;
+    expect(n).toBe(1);
+    const { client } = clientReturning(json(200, { serve_return: sr }));
+    const stats = await client.getPlayerStats(7);
+    const kept: number | undefined = stats.serve_return?.matches_incomplete;
+    expect(kept).toBe(1);
   });
 
   it('sends no query string when no filters are given', async () => {
