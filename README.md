@@ -94,11 +94,11 @@ for await (const update of stream) {
 ```
 
 Score frames nest their payload under `.score` — the same object the REST
-score reads return: `{ type: 'score', match_id, score: { sets, games, points,
-server, is_tiebreak, timestamp, win_probability_p1, danger } }`. A `null`
-model field means the model had no output for that state, not a missing
-feature. Score frames are complete-state and best-effort: a missed frame
-self-corrects on the next one, so there is nothing to replay. The stream
+score reads return: `{ type: 'score', match_id, model, score: { sets, games,
+points, server, is_tiebreak, sequence, timestamp, win_probability_p1, danger } }`.
+A `null` model field means the model had no output for that state, not a
+missing feature. Score frames are complete-state and best-effort: a missed
+frame self-corrects on the next one, so there is nothing to replay. The stream
 mints a short-lived token via `getWsToken()` before every connection (a fresh
 one on every reconnect), reconnects with exponential backoff, and
 re-subscribes — and throws the SDK's normal errors instead of retrying a bad
@@ -118,6 +118,50 @@ signal families on theirs (`signal:match:{id}` / `signal:slate`) — pass
 mint's **own advertised vocabulary**, never guessed; the `channels: […]`
 option remains the verbatim escape hatch for families newer than this SDK.
 
+#### Score first: two frames per state (since 2026-10-23)
+
+The model fields on a score (`win_probability_p1`, `danger`,
+`win_probability_p1_model`, `win_probability_meta`) come from a model run that
+starts after we accept the state — 262 ms at the median, 790 ms at p90. The
+push feed no longer waits for it. Each accepted state leaves twice, and every
+`score` frame carries `model` beside `score`: `'pending'` the instant the state
+is accepted (the four model keys present and `null`), then `'ready'` once the
+model run finished (the values). When the model finishes first the state goes
+out once, as `'ready'`. Both frames carry the same `score.sequence`, so:
+
+- **Dedup on `(match_id, score.sequence, model)`.** For one `sequence` the
+  `pending` frame always precedes the `ready` frame, and each appears at most
+  once.
+- **Apply a frame to the `sequence` it names.** A `ready` frame can arrive
+  after the `pending` frame of a *later* `sequence` when two states were
+  accepted inside one model run; take the model values from the `ready` frame
+  of that sequence.
+- **A frame with no `model` at all is `ready`** — an older server, the feature
+  switched off on our side. `scoreModelState(frame)` applies that rule.
+
+```ts
+import { PushStream, scoreModelState } from 'livetennisapi';
+
+const seen = new Set<string>();
+for await (const frame of new PushStream({ apiKey: 'twjp_…' })) {
+  if (frame.type !== 'score') continue;
+  const key = `${frame.match_id}:${frame.score?.sequence}:${scoreModelState(frame)}`;
+  if (seen.has(key)) continue;
+  seen.add(key);
+  if (scoreModelState(frame) === 'ready') console.log(frame.score?.win_probability_p1);
+}
+```
+
+**If you do not use the model fields**, pass `modelFields: false`. The token is
+minted with `?model_fields=off`, the mint names the score-only channels
+(`match:{match_id}:score_only` / `slate:score_only`) and the stream subscribes
+those: each state is one frame, `model: 'off'`, with the four model keys left
+out — nothing waits on the model and there is no second frame.
+
+```ts
+const stream = new PushStream({ apiKey: 'twjp_…', modelFields: false });
+```
+
 Bringing your own Centrifugo-protocol client instead? Mint the raw token
 yourself:
 
@@ -125,6 +169,10 @@ yourself:
 const { token, ws_url, channels } = await client.getWsToken();
 // channels.slate === 'slate:all', channels.match === 'match:{match_id}'
 // Mint a fresh token on every reconnect — never reuse one.
+
+// Score-only: the mint names the score-only pair and echoes model_fields: 'off'.
+const scoreOnly = await client.getWsToken({ model_fields: 'off' });
+// scoreOnly.channels.slate === 'slate:score_only'
 ```
 
 ### Native streamer (`LiveScoreStream`)
@@ -147,6 +195,12 @@ Reconnects with exponential backoff and re-subscribes automatically. Heartbeats 
 consumed internally, so you only see real score changes. It deliberately does **not**
 reconnect on a bad key or insufficient tier — those throw immediately instead of
 retrying forever.
+
+Since 2026-10-23 its `score` frames carry the push feed's `model` field too.
+This socket sends a state once, with the model fields on it, so the value is
+`'ready'`. Pass `modelFields: false` to add `"model_fields": false` to the
+subscribe message: every frame then leaves the four model keys out and says
+`model: 'off'`.
 
 > On Node 22+ the global `WebSocket` is used. On Node 18–20, `npm install ws`.
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { LiveScoreStream } from '../src/index.js';
+import { LiveScoreStream, scoreModelState } from '../src/index.js';
 
 /**
  * Install a fake global `WebSocket` that acks a subscribe immediately and then
@@ -313,5 +313,76 @@ describe('LiveScoreStream dead-connection watchdog', () => {
     const result = await next; // clean end via close(), NOT a silence error
     expect(result.done).toBe(true);
     expect(sent.length).toBeGreaterThan(0);
+  });
+});
+
+describe('LiveScoreStream score first (model frames)', () => {
+  let originalWebSocket: unknown;
+
+  beforeEach(() => {
+    originalWebSocket = (globalThis as unknown as { WebSocket: unknown }).WebSocket;
+  });
+
+  afterEach(() => {
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = originalWebSocket;
+  });
+
+  const pendingFrame = {
+    type: 'score',
+    match_id: 18953,
+    model: 'pending',
+    score: {
+      sets: [1, 0],
+      sequence: 104,
+      win_probability_p1: null,
+      danger: null,
+      win_probability_p1_model: null,
+      win_probability_meta: null,
+    },
+  };
+  const readyFrame = {
+    ...pendingFrame,
+    model: 'ready',
+    score: { ...pendingFrame.score, win_probability_p1: 0.62, danger: 0.18, win_probability_p1_model: 0.6 },
+  };
+  const legacyFrame = { type: 'score', match_id: 18953, score: { sets: [1, 0], sequence: 105, win_probability_p1: 0.63 } };
+
+  it('passes pending, ready and model-less frames through verbatim and classifies them', async () => {
+    installMockWebSocket({ frames: [pendingFrame, readyFrame, legacyFrame] });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test' });
+    const frames = await collect(stream, 3);
+    expect(frames[0]).toEqual(pendingFrame);
+    expect(frames[1]).toEqual(readyFrame);
+    expect(frames[2]).toEqual(legacyFrame);
+    expect(frames.map((f) => scoreModelState(f))).toEqual(['pending', 'ready', 'ready']);
+    expect((frames[0]!.score as Record<string, unknown>).win_probability_p1).toBeNull();
+    expect((frames[1]!.score as Record<string, unknown>).win_probability_p1).toBe(0.62);
+  });
+
+  it('modelFields: false adds "model_fields": false to the subscribe frame', async () => {
+    const { sent } = installMockWebSocket({ frames: [{ type: 'score', match_id: 1, model: 'off', score: {} }] });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test', modelFields: false });
+    const [frame] = await collect(stream, 1);
+    expect(JSON.parse(sent[0]!)).toEqual({ topics: ['live-scores'], model_fields: false });
+    expect(scoreModelState(frame)).toBe('off');
+  });
+
+  it('the default subscribe frame carries no model_fields key', async () => {
+    const { sent } = installMockWebSocket({ frames: [{ type: 'score', match_id: 1 }] });
+    const stream = new LiveScoreStream({ apiKey: 'twjp_test' });
+    await collect(stream, 1);
+    expect(JSON.parse(sent[0]!)).toEqual({ topics: ['live-scores'] });
+  });
+});
+
+describe('scoreModelState', () => {
+  it('reads pending, ready and off, and defaults everything else to ready', () => {
+    expect(scoreModelState({ model: 'pending' })).toBe('pending');
+    expect(scoreModelState({ model: 'ready' })).toBe('ready');
+    expect(scoreModelState({ model: 'off' })).toBe('off');
+    expect(scoreModelState({})).toBe('ready');
+    expect(scoreModelState({ model: 'something-new' })).toBe('ready');
+    expect(scoreModelState(null)).toBe('ready');
+    expect(scoreModelState(undefined)).toBe('ready');
   });
 });

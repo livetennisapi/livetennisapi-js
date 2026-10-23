@@ -48,6 +48,27 @@ export interface Score extends Extensible {
   is_tiebreak?: boolean;
   win_probability_p1?: number | null;
   danger?: number | null;
+  /**
+   * The same model read computed without the market-prior anchor. ULTRA, on
+   * live scores since 2026-09-12. Null where the model had nothing.
+   */
+  win_probability_p1_model?: number | null;
+  /**
+   * `{ model_version, generated_at, market_anchored, anchor_effective }` for
+   * the two probabilities on this state. ULTRA, since 2026-09-12.
+   */
+  win_probability_meta?: Record<string, unknown> | null;
+  /**
+   * Our per-match accept counter for this state, counting from 1 — the field
+   * to order and de-duplicate on (since 2026-09-26). On the push feed and the
+   * native socket it only ever rises; the same `sequence` twice is the same
+   * state. Null where the state predates the counter.
+   */
+  sequence?: number | null;
+  /** The instant we accepted this state, UTC (since 2026-09-15). */
+  accepted_at?: string | null;
+  /** The instant this state arrived at our edge, UTC (since 2026-09-24). */
+  received_at?: string | null;
   timestamp?: string | null;
 }
 
@@ -250,17 +271,45 @@ export interface Match extends Extensible {
 }
 
 /**
+ * Which frame of a state a `score` frame is (since 2026-10-23).
+ *
+ * - `pending`: the state the instant we accepted it. The four model keys
+ *   (`win_probability_p1`, `danger`, `win_probability_p1_model`,
+ *   `win_probability_meta`) are present and null.
+ * - `ready`: the same state once its model run finished, model values in.
+ * - `off`: the score-only channels (`modelFields: false`): one frame per
+ *   state, the model keys left out.
+ *
+ * A frame with no `model` at all is the single frame of the previous
+ * behaviour and means `ready` — {@link scoreModelState} applies that rule.
+ */
+export type ScoreModelState = 'pending' | 'ready' | 'off';
+
+/**
  * A `score` frame from the WebSocket feed.
  *
- * The wire NESTS the payload: `{"type": "score", "match_id": N, "score":
- * {...}}` — `score` is the same allowlist {@link Score} object the polling
- * endpoints return, model fields (`win_probability_p1`, `danger`) included
- * (the whole feed is ULTRA). Read `frame.score.sets`, never `frame.sets`:
- * the score fields do not exist at the top level of the frame.
+ * The wire NESTS the payload: `{"type": "score", "match_id": N, "model":
+ * "pending" | "ready" | "off", "score": {...}}` — `score` is the same
+ * allowlist {@link Score} object the polling endpoints return, model fields
+ * (`win_probability_p1`, `danger`) included (the whole feed is ULTRA). Read
+ * `frame.score.sets`, never `frame.sets`: the score fields do not exist at
+ * the top level of the frame.
+ *
+ * **Score first** (since 2026-10-23): on the push feed a state leaves twice,
+ * `model: 'pending'` the instant it is accepted (model keys null) and
+ * `model: 'ready'` once the model run finished (262 ms median, p90 790 ms
+ * later), or once as `ready` when the model finished first. Both carry the
+ * same `score.sequence`. Dedup on `(match_id, score.sequence, model)`, apply
+ * a frame to the `sequence` it names, and take the model values from the
+ * `ready` frame of that sequence — a `ready` frame can arrive after the
+ * `pending` frame of a later `sequence`. The native socket sends a state once,
+ * as `ready`. A frame with no `model` is `ready`.
  */
 export interface ScoreUpdate extends Extensible {
   type?: 'score';
   match_id?: number;
+  /** Which frame of the state this is. Absent means `ready`. */
+  model?: ScoreModelState;
   score?: Score;
 }
 
@@ -355,6 +404,8 @@ export type StreamFrame = ScoreUpdate | BreakPoint | BreakPointResult | PointUpd
 export interface PushFrame extends Extensible {
   type?: string;
   match_id?: number;
+  /** On `score` frames: which frame of the state this is. Absent means `ready`. */
+  model?: ScoreModelState;
   score?: Score;
 }
 
@@ -1218,6 +1269,15 @@ export interface WsToken extends Extensible {
     signal_match?: string;
     signal_slate?: string;
   } & Extensible;
+  /**
+   * Echo of the `model_fields` switch the token was minted with (since
+   * 2026-10-23). `'off'` means `channels.match` / `channels.slate` name the
+   * score-only streams (`match:{match_id}:score_only` / `slate:score_only`),
+   * one `model: 'off'` frame per state with the model keys left out. `'on'`
+   * (the default) means the score channels, every state as `pending` then
+   * `ready`. Absent on a server that predates the switch.
+   */
+  model_fields?: 'on' | 'off';
 }
 
 /**
@@ -1238,6 +1298,22 @@ export function gamesForSet(
     Array.isArray(p1) ? p1[setIndex] : undefined,
     Array.isArray(p2) ? p2[setIndex] : undefined,
   ];
+}
+
+/**
+ * Which frame of a state a `score` frame is: `pending`, `ready` or `off`.
+ *
+ * Reads the frame's `model` field and applies the documented default — a
+ * frame with no `model` (an older server, the feature switched off) is the
+ * single frame of a state with the model fields on it, so it is `ready`.
+ *
+ * ```ts
+ * const key = `${frame.match_id}:${frame.score?.sequence}:${scoreModelState(frame)}`;
+ * ```
+ */
+export function scoreModelState(frame: { model?: unknown } | null | undefined): ScoreModelState {
+  const model = frame?.model;
+  return model === 'pending' || model === 'off' ? model : 'ready';
 }
 
 /** Render a score as `6-4 3-6 2-1 (40-30)`. */
