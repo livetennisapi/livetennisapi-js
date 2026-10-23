@@ -22,6 +22,13 @@
  * `frame.sets`. A null model field means the model had no output for that
  * state, not that the field was left unstamped.
  *
+ * Since 2026-10-23 every `score` frame also carries `model` beside `score`.
+ * This socket sends a state once, with the model fields on it, so the value
+ * is `'ready'` (a frame with no `model` at all means the same). Pass
+ * `modelFields: false` to add `"model_fields": false` to the subscribe
+ * message: every frame then leaves the four model keys out and says
+ * `model: 'off'`. Dedup on `(match_id, score.sequence, model)`.
+ *
  * Pass `signals: ['break_point']` to also receive the headline break-point feed:
  * `break_point` frames (yielded as {@link BreakPoint}) the instant a break point
  * arises and `break_point_result` frames ({@link BreakPointResult}) when it
@@ -89,6 +96,14 @@ export interface StreamOptions {
    * Omitted (the default) means score frames only — identical to before. ULTRA.
    */
   signals?: string[];
+  /**
+   * `false` asks for score-only frames: the subscribe message carries
+   * `"model_fields": false`, and every `score` frame leaves the four model
+   * keys (`win_probability_p1`, `danger`, `win_probability_p1_model`,
+   * `win_probability_meta`) out and says `model: 'off'`. Default `true`: the
+   * model fields ride every frame, `model: 'ready'`.
+   */
+  modelFields?: boolean;
   autoReconnect?: boolean;
   /** 0 means retry forever. */
   maxReconnectAttempts?: number;
@@ -130,6 +145,7 @@ export class LiveScoreStream {
   readonly baseUrl: string;
   readonly topics: string[];
   readonly signals: string[];
+  readonly modelFields: boolean;
   readonly autoReconnect: boolean;
   readonly maxReconnectAttempts: number;
   readonly timeout: number;
@@ -142,6 +158,7 @@ export class LiveScoreStream {
     this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
     this.topics = options.topics?.length ? options.topics : ['live-scores'];
     this.signals = (options.signals ?? []).filter(Boolean);
+    this.modelFields = options.modelFields ?? true;
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
     this.timeout = options.timeout ?? 30_000;
@@ -264,10 +281,12 @@ export class LiveScoreStream {
           });
         });
 
-        // The documented subscribe frame is `{topics, signals?}` — exactly
-        // what the server reads, nothing more.
+        // The documented subscribe frame is `{topics, signals?, model_fields?}`
+        // — exactly what the server reads, nothing more. `model_fields` is
+        // sent only when switched off, so the default frame is unchanged.
         const subscribe: Record<string, unknown> = { topics: this.topics };
         if (this.signals.length) subscribe.signals = this.signals;
+        if (!this.modelFields) subscribe.model_fields = false;
         socket.send(JSON.stringify(subscribe));
 
         // Wait for the `subscribed` ack before yielding anything.

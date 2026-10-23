@@ -824,11 +824,20 @@ export class LiveTennisAPI {
    * return, model fields included. Mint a fresh token on every reconnect,
    * never reuse one across connections.
    *
+   * Since 2026-10-23 every state leaves the score channels twice — a
+   * `model: 'pending'` frame the instant it is accepted (model keys null) and
+   * a `model: 'ready'` frame once the model run finished. Dedup on
+   * `(match_id, score.sequence, model)`. If you do not use the model fields,
+   * pass `{ model_fields: 'off' }`: `channels.match` / `channels.slate` then
+   * name the score-only channels (`match:{match_id}:score_only` /
+   * `slate:score_only`), one `model: 'off'` frame per state with the model
+   * keys left out, and the response echoes `model_fields: 'off'`.
+   *
    * This is a separate transport from `LiveScoreStream` (the native `/ws`
    * feed): same data, built for high fan-out.
    */
-  getWsToken(): Promise<WsToken> {
-    return this.request('/ws-token');
+  getWsToken(params: { model_fields?: 'on' | 'off' } = {}): Promise<WsToken> {
+    return this.request('/ws-token', params);
   }
 
   // -- pagination -------------------------------------------------------------

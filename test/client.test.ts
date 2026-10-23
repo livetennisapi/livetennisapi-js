@@ -542,7 +542,26 @@ describe('requests', () => {
     );
     const tok = await client.getWsToken();
     expect(calls[0]!.url).toContain(`${BASE}/ws-token`);
+    expect(calls[0]!.url).not.toContain('model_fields');
     expect(tok.channels?.slate).toBe('slate:all');
+    expect(tok.model_fields).toBeUndefined();
+  });
+
+  it('passes model_fields=off to the ws-token mint and reads the echo', async () => {
+    const { client, calls } = clientReturning(
+      json(200, {
+        token: 'x',
+        expires_in: 300,
+        ws_url: 'wss://api.livetennisapi.com/connection/websocket',
+        channels: { match: 'match:{match_id}:score_only', slate: 'slate:score_only' },
+        model_fields: 'off',
+      }),
+    );
+    const tok = await client.getWsToken({ model_fields: 'off' });
+    expect(calls[0]!.url).toContain(`${BASE}/ws-token?model_fields=off`);
+    expect(tok.model_fields).toBe('off');
+    expect(tok.channels?.slate).toBe('slate:score_only');
+    expect(tok.channels?.match).toBe('match:{match_id}:score_only');
   });
 });
 

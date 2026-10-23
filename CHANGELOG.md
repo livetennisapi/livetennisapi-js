@@ -5,6 +5,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-10-23
+
+### Added
+- **Score first.** Every push and WebSocket `score` frame now carries `model`
+  beside `score` (API 2026-10-23): `'pending'` the instant a state is accepted
+  (the four model keys present and null), `'ready'` once its model run
+  finished, or `'off'` on the score-only channels. On the push feed a state
+  leaves twice, pending then ready, with the same `score.sequence`, so dedup
+  on `(match_id, score.sequence, model)` and apply each frame to the
+  `sequence` it names. A frame with no `model` is `ready`. New type
+  `ScoreModelState`, new `model` field on `ScoreUpdate` and `PushFrame`, and
+  `scoreModelState(frame)`, which applies the missing-means-ready rule.
+- **`modelFields: false`** on `PushStream` (mints with `?model_fields=off` and
+  subscribes the score-only channels the mint names) and on
+  `LiveScoreStream` (sends `"model_fields": false` on subscribe). Each state
+  is then one `model: 'off'` frame with the model keys left out.
+- `getWsToken({ model_fields: 'off' })` and the `WsToken.model_fields` echo.
+- `Score` types `sequence`, `accepted_at`, `received_at`,
+  `win_probability_p1_model` and `win_probability_meta`, all of which the
+  score object has carried for a while and the interface did not name.
+
 ## [1.10.1] - 2026-10-22
 
 ### Fixed

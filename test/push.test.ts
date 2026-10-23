@@ -7,6 +7,7 @@ import {
   ServiceUnavailable,
   Unauthorized,
   UpgradeRequired,
+  scoreModelState,
 } from '../src/index.js';
 
 /**
@@ -941,5 +942,146 @@ describe('PushStream signal feed', () => {
       .filter((msg) => msg.subscribe)
       .map((msg) => (msg.subscribe as { channel: string }).channel);
     expect(subscribes).toEqual(['match:7', 'point:match:7', 'signal:match:7']);
+  });
+});
+
+describe('PushStream score first (model frames)', () => {
+  // The two frames one state leaves as since 2026-10-23, verbatim: the same
+  // `score.sequence`, `model: 'pending'` with the four model keys null, then
+  // `model: 'ready'` with the values. Nothing is reshaped on the way through.
+  const pendingFrame = {
+    type: 'score',
+    match_id: 18953,
+    model: 'pending',
+    score: {
+      sets: [1, 0],
+      games: [[6, 3], [4, 2]],
+      points: ['30', '40'],
+      server: 2,
+      is_tiebreak: false,
+      sequence: 104,
+      accepted_at: '2026-10-23T10:00:00.000Z',
+      win_probability_p1: null,
+      danger: null,
+      win_probability_p1_model: null,
+      win_probability_meta: null,
+    },
+  };
+  const readyFrame = {
+    ...pendingFrame,
+    model: 'ready',
+    score: {
+      ...pendingFrame.score,
+      win_probability_p1: 0.62,
+      danger: 0.18,
+      win_probability_p1_model: 0.6,
+      win_probability_meta: { model_version: 'markov-population-2026-08-23', anchor_effective: true },
+    },
+  };
+  // An older server: one frame, no `model` key at all.
+  const legacyFrame = {
+    type: 'score',
+    match_id: 18953,
+    score: { sets: [1, 0], sequence: 105, win_probability_p1: 0.63, danger: 0.17 },
+  };
+
+  it('passes a pending frame through verbatim, model keys present and null', async () => {
+    const { fetchImpl } = installMintFetch();
+    installMockPushServer({ frames: [pendingFrame] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl });
+    const [frame] = await collect(stream, 1);
+    expect(frame).toEqual(pendingFrame);
+    expect(scoreModelState(frame)).toBe('pending');
+    const score = frame!.score as Record<string, unknown>;
+    expect('win_probability_p1' in score).toBe(true);
+    expect(score.win_probability_p1).toBeNull();
+    expect(score.win_probability_meta).toBeNull();
+    expect(score.sequence).toBe(104);
+  });
+
+  it('yields pending then ready for one sequence, in order, and dedups on (match_id, sequence, model)', async () => {
+    const { fetchImpl } = installMintFetch();
+    installMockPushServer({ frames: [pendingFrame, readyFrame, legacyFrame] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl });
+    const frames = await collect(stream, 3);
+    expect(frames.map((f) => scoreModelState(f))).toEqual(['pending', 'ready', 'ready']);
+    const keys = frames.map((f) => `${f.match_id}:${(f.score as Record<string, unknown>).sequence}:${scoreModelState(f)}`);
+    expect(new Set(keys).size).toBe(3);
+    expect(keys).toEqual(['18953:104:pending', '18953:104:ready', '18953:105:ready']);
+    expect((frames[1]!.score as Record<string, unknown>).win_probability_p1).toBe(0.62);
+  });
+
+  it('treats a frame with no model key as ready', async () => {
+    const { fetchImpl } = installMintFetch();
+    installMockPushServer({ frames: [legacyFrame] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl });
+    const [frame] = await collect(stream, 1);
+    expect(frame!.model).toBeUndefined();
+    expect(scoreModelState(frame)).toBe('ready');
+  });
+
+  it('modelFields: false mints with ?model_fields=off and subscribes the score-only channels the mint names', async () => {
+    // A mint that honours the switch: the vocabulary names the score-only
+    // pair and echoes model_fields: "off". The stream never hardcodes those
+    // names — it subscribes whatever the mint said.
+    const calls: string[] = [];
+    const fetchImpl = (async (url: unknown) => {
+      calls.push(String(url));
+      const off = new URL(String(url)).searchParams.get('model_fields') === 'off';
+      return new Response(
+        JSON.stringify({
+          token: 'jwt-1',
+          expires_in: 3600,
+          ws_url: 'wss://push.example/connection/websocket',
+          channels: off
+            ? { match: 'match:{match_id}:score_only', slate: 'slate:score_only' }
+            : { match: 'match:{match_id}', slate: 'slate:all' },
+          model_fields: off ? 'off' : 'on',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+    const offFrame = {
+      type: 'score',
+      match_id: 18953,
+      model: 'off',
+      score: { sets: [1, 0], sequence: 104 },
+    };
+    const { sent } = installMockPushServer({ framesByChannel: { 'slate:score_only': [offFrame] } });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl, modelFields: false });
+    const [frame] = await collect(stream, 1);
+    expect(calls[0]).toContain('/ws-token?model_fields=off');
+    const subscribed = sent.map((s) => JSON.parse(s)).filter((m) => m.subscribe).map((m) => m.subscribe.channel);
+    expect(subscribed).toEqual(['slate:score_only']);
+    expect(frame).toEqual(offFrame);
+    expect(scoreModelState(frame)).toBe('off');
+    expect('win_probability_p1' in (frame!.score as object)).toBe(false);
+  });
+
+  it('modelFields: false with matches subscribes the per-match score-only template', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          token: 'jwt-1',
+          expires_in: 3600,
+          ws_url: 'wss://push.example/connection/websocket',
+          channels: { match: 'match:{match_id}:score_only', slate: 'slate:score_only' },
+          model_fields: 'off',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof globalThis.fetch;
+    const { sent } = installMockPushServer({ frames: [{ type: 'score', match_id: 7, model: 'off', score: {} }] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl, matches: [7], modelFields: false });
+    await collect(stream, 1);
+    const subscribed = sent.map((s) => JSON.parse(s)).filter((m) => m.subscribe).map((m) => m.subscribe.channel);
+    expect(subscribed).toEqual(['match:7:score_only']);
+  });
+
+  it('the default mint carries no model_fields parameter', async () => {
+    const { fetchImpl, calls } = installMintFetch();
+    installMockPushServer({ frames: [legacyFrame] });
+    const stream = new PushStream({ apiKey: 'twjp_test', fetch: fetchImpl });
+    await collect(stream, 1);
+    expect(calls[0]).toMatch(/\/ws-token$/);
   });
 });
