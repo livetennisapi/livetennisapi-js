@@ -5,6 +5,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Trailing slashes on `baseUrl` are now removed with a linear scan instead of
+  the regex `/\/+$/`, which ran in quadratic time on a base URL made of many
+  slashes (CodeQL js/polynomial-redos). Behaviour is unchanged for every
+  normal URL. Applies to `LiveTennisAPI`, `LiveScoreStream` and `PushStream`.
+
 ## [1.10.0] - 2026-10-22
 
 ### Added

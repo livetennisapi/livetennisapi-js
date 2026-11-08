@@ -40,7 +40,7 @@
  * and falls back to the `ws` package on older Node.
  */
 
-import { DEFAULT_BASE_URL, readEnv } from './client.js';
+import { DEFAULT_BASE_URL, readEnv, stripTrailingSlashes } from './client.js';
 import {
   APIConnectionError,
   LiveTennisAPIError,
@@ -139,7 +139,7 @@ export class LiveScoreStream {
 
   constructor(options: StreamOptions = {}) {
     this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
-    this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL));
     this.topics = options.topics?.length ? options.topics : ['live-scores'];
     this.signals = (options.signals ?? []).filter(Boolean);
     this.autoReconnect = options.autoReconnect ?? true;

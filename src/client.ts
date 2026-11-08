@@ -139,6 +139,20 @@ export function readEnv(name: string): string {
   }
 }
 
+/**
+ * Drop every trailing `/` from a base URL so paths can be appended with one.
+ *
+ * A single backwards scan rather than `replace(/\/+$/, '')`: on a string of
+ * many slashes followed by a non-slash the regex retries from every slash and
+ * runs in quadratic time (CodeQL js/polynomial-redos). The base URL can come
+ * from the environment, so it is treated as untrusted.
+ */
+export function stripTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47 /* '/' */) end -= 1;
+  return end === url.length ? url : url.slice(0, end);
+}
+
 /** True in a browser, where the platform forbids setting User-Agent. */
 function isBrowser(): boolean {
   return typeof (globalThis as { window?: unknown }).window !== 'undefined';
@@ -154,7 +168,7 @@ export class LiveTennisAPI {
 
   constructor(options: ClientOptions = {}) {
     this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
-    this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL));
     this.timeout = options.timeout ?? 30_000;
     this.maxRetries = Math.max(0, options.maxRetries ?? 2);
     this.authHeader = options.authHeader ?? 'bearer';
