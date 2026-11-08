@@ -60,7 +60,7 @@
  * and falls back to the `ws` package on older Node.
  */
 
-import { DEFAULT_BASE_URL, LiveTennisAPI, readEnv } from './client.js';
+import { DEFAULT_BASE_URL, LiveTennisAPI, readEnv, stripTrailingSlashes } from './client.js';
 import {
   APIConnectionError,
   LiveTennisAPIError,
@@ -278,7 +278,7 @@ export class PushStream {
 
   constructor(options: PushStreamOptions = {}) {
     this.apiKey = (options.apiKey ?? readEnv('LIVETENNISAPI_KEY')).trim();
-    this.baseUrl = (options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL)).replace(/\/+$/, '');
+    this.baseUrl = stripTrailingSlashes(options.baseUrl ?? (readEnv('LIVETENNISAPI_BASE_URL') || DEFAULT_BASE_URL));
     // Validate, never filter: silently dropping a bad id (NaN from a failed
     // parse, say) would widen a single-match request to the entire live slate.
     const matches = options.matches ?? [];

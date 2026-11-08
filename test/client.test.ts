@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PlayerRecentMatch } from '../src/index.js';
+import { stripTrailingSlashes } from '../src/client.js';
 
 import {
   AbuseThrottled,
@@ -12,6 +13,8 @@ import {
   ServiceUnavailable,
   Unauthorized,
   UpgradeRequired,
+  LiveScoreStream,
+  PushStream,
   formatScore,
   gamesForSet,
 } from '../src/index.js';
@@ -810,5 +813,59 @@ describe('getPlayerStats', () => {
     const { client, calls } = clientReturning(json(200, {}));
     await client.getPlayerStats(7);
     expect(calls[0]!.url).toBe(`${BASE}/players/7/stats`);
+  });
+});
+
+describe('base URL normalisation', () => {
+  /** The regex the helper replaced, kept here only as the parity oracle. */
+  const legacy = (url: string) => url.replace(/\/+$/, '');
+
+  const fixtures = [
+    '',
+    '/',
+    '///',
+    'https://api.livetennisapi.com/api/public/v1',
+    'https://api.livetennisapi.com/api/public/v1/',
+    'https://api.livetennisapi.com/api/public/v1///',
+    'https://api.livetennisapi.com//api//public//v1//',
+    'http://localhost:8080',
+    'http://localhost:8080/',
+    'https://example.com/a/b/c////',
+    'https://example.com/trailing-space/ ',
+    'https://example.com/?q=1/',
+    'wss://stream.example.com/ws/',
+  ];
+
+  it('matches the old regex on every fixture', () => {
+    for (const url of fixtures) {
+      expect(stripTrailingSlashes(url)).toBe(legacy(url));
+    }
+  });
+
+  it('is linear on a pathological base URL of 100k slashes', () => {
+    // The old `/\/+$/` retried from every slash on this input, which is
+    // quadratic. 100k repetitions must now finish well inside a frame.
+    const slashes = '/'.repeat(100_000);
+    const inputs = [`https://example.com${slashes}x`, `https://example.com${slashes}`, slashes];
+    const started = performance.now();
+    const results = inputs.map(stripTrailingSlashes);
+    const elapsed = performance.now() - started;
+    expect(results).toEqual([`https://example.com${slashes}x`, 'https://example.com', '']);
+    expect(elapsed).toBeLessThan(50);
+  });
+
+  it('strips trailing slashes from every client base URL and still builds the same request URLs', async () => {
+    const base = `${BASE}///`;
+    const { client, calls } = clientReturning(json(200, { data: [] }), { baseUrl: base });
+    expect(client.baseUrl).toBe(BASE);
+    await client.listMatches();
+    expect(calls[0]!.url.startsWith(`${BASE}/matches`)).toBe(true);
+
+    const live = new LiveScoreStream({ apiKey: 'twjp_test', baseUrl: base });
+    expect(live.baseUrl).toBe(BASE);
+    expect(new URL(live.url).pathname).toBe('/api/public/v1/ws');
+
+    const push = new PushStream({ apiKey: 'twjp_test', baseUrl: base, fetch: globalThis.fetch });
+    expect(push.baseUrl).toBe(BASE);
   });
 });
