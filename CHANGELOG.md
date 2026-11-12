@@ -5,6 +5,22 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Seven `Fixture` fields from spec 1.13.82**: `reason` (`walkover`,
+  `retired`, `cancelled`, `default` or `postponed`), `match_id` (the id of the
+  match the fixture became, null until one exists), `gender` (`men` or
+  `women`, null for mixed events), `is_qualifying`, `created_at`, `updated_at`
+  and `pregame_forecasts`. `is_qualifying` is three-valued: null means never
+  stated, and null is not false. `pregame_forecasts` is ULTRA only and absent
+  below ULTRA, so `undefined` means "not entitled" and `[]` means "no
+  forecast yet".
+- **`Match.is_qualifying` and `Match.pregame_forecasts`**, with the same
+  meaning. `pregame_forecasts` rides on ULTRA `status: 'upcoming'` list rows
+  only.
+
+  These were already readable through the index signature as `unknown`. They
+  are now typed and documented.
+
 ### Fixed
 - Trailing slashes on `baseUrl` are now removed with a linear scan instead of
   the regex `/\/+$/`, which ran in quadratic time on a base URL made of many
