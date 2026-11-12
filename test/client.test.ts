@@ -764,6 +764,91 @@ describe('forward compatibility', () => {
     expect(page.data[0].has_analysis).toBe(true);
     expect(page.data[0].has_market).toBe(false);
   });
+
+  it('types is_qualifying and pregame_forecasts on a match (spec 1.13.82)', async () => {
+    const forecast = { win_probability_p1: 0.58, stage: 'pregame' };
+    const listed = clientReturning(
+      json(200, {
+        data: [
+          { id: 15, is_qualifying: true, pregame_forecasts: [forecast] },
+          { id: 16, is_qualifying: null, pregame_forecasts: [] },
+          { id: 17 },
+        ],
+        meta: { limit: 3, offset: 0, count: 3 },
+      }),
+    );
+    const page = await listed.client.listMatches({ status: 'upcoming' });
+    // Typed access — not the index signature.
+    const q: boolean | null | undefined = page.data[0].is_qualifying;
+    const f: Record<string, unknown>[] | undefined = page.data[0].pregame_forecasts;
+    expect(q).toBe(true);
+    expect(f).toEqual([forecast]);
+    // Null means never stated, and null is not false.
+    expect(page.data[1].is_qualifying).toBeNull();
+    expect(page.data[1].pregame_forecasts).toEqual([]);
+    // Absent below ULTRA and on other statuses: undefined, never a guessed [].
+    expect(page.data[2].is_qualifying).toBeUndefined();
+    expect(page.data[2].pregame_forecasts).toBeUndefined();
+  });
+});
+
+describe('Fixture fields (spec 1.13.82)', () => {
+  const meta = { limit: 1, offset: 0, count: 1 };
+
+  it('types reason, match_id, gender, is_qualifying and both timestamps', async () => {
+    const row = {
+      id: 1,
+      status: 'cancelled',
+      reason: 'walkover',
+      match_id: 48213,
+      gender: 'women',
+      is_qualifying: false,
+      created_at: '2026-09-23T08:00:00Z',
+      updated_at: '2026-09-24T10:30:00Z',
+    };
+    const { client } = clientReturning(json(200, { data: [row], meta }));
+    const fixture = (await client.listFixtures()).data[0];
+    // Typed access — the declared unions, not the index signature.
+    const reason: 'walkover' | 'retired' | 'cancelled' | 'default' | 'postponed' | null | undefined = fixture.reason;
+    const matchId: number | null | undefined = fixture.match_id;
+    const gender: 'men' | 'women' | null | undefined = fixture.gender;
+    const qualifying: boolean | null | undefined = fixture.is_qualifying;
+    const createdAt: string | null | undefined = fixture.created_at;
+    const updatedAt: string | null | undefined = fixture.updated_at;
+    expect(reason).toBe('walkover');
+    expect(matchId).toBe(48213);
+    expect(gender).toBe('women');
+    expect(qualifying).toBe(false);
+    expect(createdAt).toBe('2026-09-23T08:00:00Z');
+    expect(updatedAt).toBe('2026-09-24T10:30:00Z');
+  });
+
+  it('keeps null as null: no match yet, a mixed event, a draw never stated', async () => {
+    const row = { id: 2, reason: null, match_id: null, gender: null, is_qualifying: null, created_at: null, updated_at: null };
+    const { client } = clientReturning(json(200, { data: [row], meta }));
+    const fixture = (await client.listFixtures()).data[0];
+    expect(fixture.reason).toBeNull();
+    expect(fixture.match_id).toBeNull();
+    expect(fixture.gender).toBeNull();
+    // Null means never stated, and null is not false.
+    expect(fixture.is_qualifying).toBeNull();
+    expect(fixture.created_at).toBeNull();
+    expect(fixture.updated_at).toBeNull();
+  });
+
+  it('types pregame_forecasts and leaves it absent below ULTRA', async () => {
+    const forecast = { win_probability_p1: 0.61, stage: 'pregame', created_at: '2026-09-24T07:00:00Z' };
+    const ultra = clientReturning(json(200, { data: [{ id: 3, match_id: 48213, pregame_forecasts: [forecast] }], meta }));
+    const rich = (await ultra.client.listFixtures()).data[0];
+    const forecasts: Record<string, unknown>[] | undefined = rich.pregame_forecasts;
+    expect(forecasts).toEqual([forecast]);
+
+    const unbound = clientReturning(json(200, { data: [{ id: 4, match_id: null, pregame_forecasts: [] }], meta }));
+    expect((await unbound.client.listFixtures()).data[0].pregame_forecasts).toEqual([]);
+
+    const lower = clientReturning(json(200, { data: [{ id: 5 }], meta }));
+    expect((await lower.client.listFixtures()).data[0].pregame_forecasts).toBeUndefined();
+  });
 });
 
 describe('getPlayerStats', () => {

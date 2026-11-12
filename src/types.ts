@@ -157,6 +157,42 @@ export interface Fixture extends Extensible {
   player1_name?: string | null;
   player2_name?: string | null;
   status?: string | null;
+  /**
+   * Why a fixture ended without being played out. `status` folds a walkover,
+   * a retirement, a default and a plain cancellation into `cancelled`; this
+   * field names which one. Null on a scheduled, live or finished fixture.
+   */
+  reason?: 'walkover' | 'retired' | 'cancelled' | 'default' | 'postponed' | null;
+  /**
+   * The `id` of the match this fixture became, which every match method
+   * accepts. Null while no match exists yet — a fixture can publish days
+   * before its match. Set when found and never cleared.
+   */
+  match_id?: number | null;
+  /** The sex of the event, in the vocabulary of the `gender` filter. Null for mixed doubles and mixed team events. */
+  gender?: 'men' | 'women' | null;
+  /**
+   * Whether the fixture is in the qualifying draw. Three-valued like
+   * {@link Match.is_qualifying}: null means never stated, and null is not
+   * false. The qualifying draw is published under the main draw's tournament
+   * name, so group a schedule on `round_code` and this flag together.
+   */
+  is_qualifying?: boolean | null;
+  /** When this row first existed, UTC. A `created_at` inside your polling window is a new row. */
+  created_at?: string | null;
+  /**
+   * When this row last changed, UTC. A moved `updated_at` with `created_at`
+   * unchanged is a change to a row you already hold, such as a re-listed
+   * start time.
+   */
+  updated_at?: string | null;
+  /**
+   * ULTRA only. The bound match's `stage: pregame` forecasts, oldest first,
+   * each in the {@link Analysis} `profile` shape. `[]` when the fixture has no
+   * `match_id` yet or no forecast has been written. The field is *absent*
+   * below ULTRA, so `undefined` means "not entitled", never "no forecast".
+   */
+  pregame_forecasts?: Record<string, unknown>[];
 }
 
 /**
@@ -245,6 +281,20 @@ export interface Match extends Extensible {
    * answers `404 no_market`. Absent when talking to an older server.
    */
   has_market?: boolean;
+  /**
+   * Whether this match belongs to the qualifying draw. Three-valued: null
+   * means never stated, and null is not false. The qualifying draw shares the
+   * main draw's tournament name and round vocabulary, so branch on
+   * `round_code` and this flag together.
+   */
+  is_qualifying?: boolean | null;
+  /**
+   * ULTRA only, on `status: 'upcoming'` list rows. The match's
+   * `stage: pregame` forecasts, oldest first, each in the {@link Analysis}
+   * `profile` shape. `[]` when none has been written yet. The field is
+   * *absent* below ULTRA and on other statuses.
+   */
+  pregame_forecasts?: Record<string, unknown>[];
   market?: Market | null;
   analysis?: Analysis | null;
 }
