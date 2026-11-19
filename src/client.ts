@@ -111,6 +111,32 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
+/**
+ * Settle with `promise`, or reject as soon as `signal` aborts. The platform
+ * fetch already fails its promise and its body stream on abort. A custom
+ * fetch may ignore the signal, so the client enforces its own deadline here.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 export interface ClientOptions {
   /** Your `twjp_` key. Falls back to `process.env.LIVETENNISAPI_KEY` on Node. */
   apiKey?: string;
@@ -179,7 +205,10 @@ export class LiveTennisAPI {
         'No global fetch available. Use Node 18+, or pass a fetch implementation via { fetch }.',
       );
     }
-    this.fetchImpl = impl;
+    // A browser's fetch must be called on the global object. A stored copy
+    // called as a method of this client throws "Illegal invocation" in
+    // Chrome. The wrapper calls the global fetch the way the page would.
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   // -- transport --------------------------------------------------------------
@@ -233,63 +262,86 @@ export class LiveTennisAPI {
     requiredTier?: Tier,
   ): Promise<T> {
     const url = this.url(path, params);
+    // Called as a plain function, never as a method of this client: a
+    // browser's fetch passed in as `{ fetch: window.fetch }` refuses any
+    // receiver but the global object.
+    const fetchImpl = this.fetchImpl;
 
     for (let attempt = 0; ; attempt += 1) {
+      const retryable = attempt < this.maxRetries;
       let response: Response;
+      let body: unknown;
 
+      // One deadline covers the whole attempt, headers and body. A server
+      // can send its headers and then stall the body, and a timer cleared at
+      // the headers would leave that read with no deadline at all.
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeout);
       try {
-        response = await this.fetchImpl(url, {
-          method: 'GET',
-          headers: this.headers(),
-          signal: controller.signal,
-        });
-      } catch (err) {
-        const aborted = err instanceof Error && err.name === 'AbortError';
-        if (attempt >= this.maxRetries) {
-          throw aborted
-            ? new APITimeoutError(`request to ${url} timed out after ${this.timeout}ms`)
-            : new APIConnectionError(`could not reach ${url}: ${String(err)}`);
-        }
-        await sleep(this.backoff(attempt));
-        continue;
-      } finally {
-        clearTimeout(timer);
-      }
-
-      if (this.shouldRetry(response.status) && attempt < this.maxRetries) {
-        if (response.status === 429) {
-          // Not every 429 is worth retrying. A daily 429 (`scope: "day"`) does
-          // not lift until the daily reset, and `abuse_throttled` is a ~24h
-          // block that counts rejected requests — retrying either inside a
-          // request is exactly the loop the API is telling you to fix.
-          const body = await this.decode(response);
-          const shape = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
-          if (shape.error === 'abuse_throttled' || shape.scope === 'day') {
-            this.throwFor(response, path, url, body, requiredTier);
-          }
-        } else {
+        response = await untilAborted(
+          fetchImpl(url, {
+            method: 'GET',
+            headers: this.headers(),
+            signal: controller.signal,
+          }),
+          controller.signal,
+        );
+        if (this.shouldRetry(response.status) && retryable && response.status !== 429) {
           // Drain the discarded body, or undici holds the connection until GC.
           try {
             await response.body?.cancel();
           } catch {
             /* already consumed or unsupported */
           }
+        } else {
+          body = await this.decode(response, controller.signal);
+        }
+      } catch (err) {
+        // No response, or the deadline fired before the body was read.
+        const aborted = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
+        if (!retryable) {
+          throw aborted
+            ? new APITimeoutError(`request to ${url} timed out after ${this.timeout}ms`)
+            : new APIConnectionError(`could not reach ${url}: ${String(err)}`);
+        }
+        clearTimeout(timer);
+        await sleep(this.backoff(attempt));
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      if (this.shouldRetry(response.status) && retryable) {
+        if (response.status === 429) {
+          // Not every 429 is worth retrying. A daily 429 (`scope: "day"`) does
+          // not lift until the daily reset, and `abuse_throttled` is a ~24h
+          // block that counts rejected requests — retrying either inside a
+          // request is exactly the loop the API is telling you to fix.
+          const shape = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+          if (shape.error === 'abuse_throttled' || shape.scope === 'day') {
+            this.throwFor(response, path, url, body, requiredTier);
+          }
         }
         await sleep(this.backoff(attempt, retryAfterSeconds(response.headers)));
         continue;
       }
 
-      if (!response.ok) this.throwFor(response, path, url, await this.decode(response), requiredTier);
-      return (await this.decode(response)) as T;
+      if (!response.ok) this.throwFor(response, path, url, body, requiredTier);
+      return body as T;
     }
   }
 
-  private async decode(response: Response): Promise<unknown> {
+  /**
+   * Parse the body as JSON under the attempt's deadline. A body that is not
+   * JSON (an HTML error page, an empty reply) gives `undefined`. A read the
+   * deadline cut short throws, so the caller reports a timeout and never
+   * returns a silent `undefined`.
+   */
+  private async decode(response: Response, signal: AbortSignal): Promise<unknown> {
     try {
-      return await response.json();
-    } catch {
+      return await untilAborted(response.json(), signal);
+    } catch (err) {
+      if (signal.aborted) throw err;
       return undefined;
     }
   }

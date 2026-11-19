@@ -382,7 +382,7 @@ try {
 | `RateLimited` | 429 — has `.retryAfter` (seconds); a **daily** 429 also has `.resetsAt`, the absolute ISO instant the allowance returns |
 | `AbuseThrottled` | 429 `abuse_throttled` — a ~24h block for chronic over-cap use; has `.retryAtEpoch`. Fix the retry loop |
 | `ServerError` / `ServiceUnavailable` | 5xx |
-| `APIConnectionError` / `APITimeoutError` | never reached the API |
+| `APIConnectionError` / `APITimeoutError` | never reached the API, or the reply did not finish within `timeout` |
 
 All extend `LiveTennisAPIError` (`AbuseThrottled` extends `RateLimited`, so an
 existing `catch` keeps working).
@@ -558,7 +558,7 @@ all — it authenticates with a short-lived token minted over REST. Only
 new LiveTennisAPI({
   apiKey: 'twjp_…',       // or $LIVETENNISAPI_KEY
   baseUrl: undefined,      // or $LIVETENNISAPI_BASE_URL
-  timeout: 30_000,
+  timeout: 30_000,        // ms per attempt, headers and body
   maxRetries: 2,
   authHeader: 'bearer',   // or 'x-api-key'
   fetch: undefined,       // inject a custom fetch

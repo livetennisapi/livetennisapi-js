@@ -6,6 +6,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Browsers.** Every request failed in Chrome with `TypeError: Failed to
+  execute 'fetch' on 'Window': Illegal invocation`, before anything went out.
+  The client kept the global `fetch` and called it as its own method, and a
+  browser's `fetch` refuses any `this` but the global object. Node's fetch
+  does not check, so the tests never caught it. With no `fetch` option the
+  client now calls `globalThis.fetch(input, init)` when each request is made.
+  A `fetch` you pass in is called as a plain function, so
+  `{ fetch: window.fetch }` works too. Also affects `PushStream`, which mints
+  its token through the same client.
+- **`timeout` now covers the body.** The timer stopped once the headers
+  arrived, so a reply whose body stalled hung the call forever. The deadline
+  now runs until the body is read. A body cut off by it throws
+  `APITimeoutError` and is retried like any other timeout, never returned as
+  `undefined`. The client enforces the deadline itself, so a custom `fetch`
+  that ignores the abort signal is covered too.
 - Trailing slashes on `baseUrl` are now removed with a linear scan instead of
   the regex `/\/+$/`, which ran in quadratic time on a base URL made of many
   slashes (CodeQL js/polynomial-redos). Behaviour is unchanged for every

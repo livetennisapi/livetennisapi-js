@@ -1,9 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PlayerRecentMatch, PlayerServeReturn } from '../src/index.js';
 import { stripTrailingSlashes } from '../src/client.js';
 
 import {
+  APIConnectionError,
+  APITimeoutError,
   AbuseThrottled,
   BadRequest,
   LiveTennisAPI,
@@ -309,6 +314,116 @@ describe('retries', () => {
     );
     await expect(client.getMatch(1)).rejects.toBeInstanceOf(AbuseThrottled);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('default fetch', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /**
+   * A stand-in for a browser's fetch. Chrome refuses any receiver other than
+   * the global object or none, with "Illegal invocation". Node's undici does
+   * not check, which is why the suite never saw the browser failure.
+   */
+  function browserFetch(body: unknown = { status: 'ok' }) {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    const impl = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+      }
+      calls.push({ url: String(input), init });
+      return Promise.resolve(json(200, body));
+    };
+    return { impl: impl as typeof fetch, calls };
+  }
+
+  it('calls the global fetch with a receiver a browser accepts', async () => {
+    const { impl, calls } = browserFetch();
+    globalThis.fetch = impl;
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0 });
+    await expect(client.health()).resolves.toEqual({ status: 'ok' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(`${BASE}/health`);
+    expect(calls[0]!.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('calls a fetch passed in options as given, so window.fetch works too', async () => {
+    const { impl, calls } = browserFetch({ id: 9 });
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0, fetch: impl });
+    expect((await client.getMatch(9)).id).toBe(9);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('reads the global fetch when the request is made', async () => {
+    const first = browserFetch({ id: 3 });
+    globalThis.fetch = first.impl;
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0 });
+    const later = browserFetch({ id: 4 });
+    globalThis.fetch = later.impl;
+    expect((await client.getMatch(4)).id).toBe(4);
+    expect(first.calls).toHaveLength(0);
+    expect(later.calls).toHaveLength(1);
+  });
+
+  it('still refuses to build a client when there is no fetch at all', () => {
+    (globalThis as { fetch?: unknown }).fetch = undefined;
+    expect(() => new LiveTennisAPI({ apiKey: 'twjp_test' })).toThrow(/No global fetch available/);
+  });
+});
+
+describe('timeout covers the body', () => {
+  /** A 200 whose headers arrive at once and whose body stops half way, forever. */
+  const stalledBody = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+
+  it('throws APITimeoutError when the body never finishes', { timeout: 3_000 }, async () => {
+    const { client, calls } = clientReturning(stalledBody(), { timeout: 100, maxRetries: 0 });
+    const started = Date.now();
+    await expect(client.getMatch(1)).rejects.toBeInstanceOf(APITimeoutError);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries a stalled body like any other timeout', { timeout: 5_000 }, async () => {
+    const { client, calls } = clientReturning([stalledBody(), json(200, { id: 2 })], {
+      timeout: 100,
+      maxRetries: 1,
+    });
+    expect((await client.getMatch(2)).id).toBe(2);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('times out a real socket that sends headers and then stalls', { timeout: 5_000 }, async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"id":');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const client = new LiveTennisAPI({
+        apiKey: 'twjp_test',
+        baseUrl: `http://127.0.0.1:${port}`,
+        timeout: 200,
+        maxRetries: 0,
+      });
+      const err = await client.getMatch(1).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(APITimeoutError);
+      expect(err).toBeInstanceOf(APIConnectionError);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
