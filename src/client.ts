@@ -288,16 +288,18 @@ export class LiveTennisAPI {
         );
         if (this.shouldRetry(response.status) && retryable && response.status !== 429) {
           // Drain the discarded body, or undici holds the connection until GC.
+          // Not awaited: a cloned (teed) body settles its cancel only once
+          // its twin is cancelled too, and the retry must not wait on that.
           try {
-            await response.body?.cancel();
+            void response.body?.cancel().catch(() => undefined);
           } catch {
-            /* already consumed or unsupported */
+            /* a polyfilled body with no cancel() */
           }
         } else {
           body = await this.decode(response, controller.signal);
         }
       } catch (err) {
-        // No response, or the deadline fired before the body was read.
+        // No response, a body read that failed, or the deadline fired first.
         const aborted = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
         if (!retryable) {
           throw aborted
@@ -332,16 +334,22 @@ export class LiveTennisAPI {
   }
 
   /**
-   * Parse the body as JSON under the attempt's deadline. A body that is not
-   * JSON (an HTML error page, an empty reply) gives `undefined`. A read the
-   * deadline cut short throws, so the caller reports a timeout and never
-   * returns a silent `undefined`.
+   * Read the body under the attempt's deadline, then parse it as JSON.
+   *
+   * Reading and parsing fail in different ways and are kept apart, whatever
+   * fetch the caller passed. A failed read (the deadline, a dropped
+   * connection) throws, so the caller retries or raises `APITimeoutError` /
+   * `APIConnectionError`, never a silent `undefined`. A body that arrived
+   * whole but is not JSON (an HTML error page, an empty reply) gives
+   * `undefined`. That split does not depend on the error class a fetch
+   * uses for bad JSON, which differs between implementations.
    */
   private async decode(response: Response, signal: AbortSignal): Promise<unknown> {
+    const text = await untilAborted(response.text(), signal);
+    if (!text) return undefined;
     try {
-      return await untilAborted(response.json(), signal);
-    } catch (err) {
-      if (signal.aborted) throw err;
+      return JSON.parse(text) as unknown;
+    } catch {
       return undefined;
     }
   }

@@ -23,6 +23,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   `APITimeoutError` and is retried like any other timeout, never returned as
   `undefined`. The client enforces the deadline itself, so a custom `fetch`
   that ignores the abort signal is covered too.
+- **A body cut off mid-read** now raises `APIConnectionError`, and is
+  retried like any other connection error, instead of resolving to
+  `undefined`. This matches the Python client. The body is read as text
+  first and parsed after, so a whole body that is not JSON still gives
+  `undefined`. That no longer depends on the error class a custom `fetch`
+  throws for bad JSON.
+- A retried 5xx no longer waits for its discarded body to cancel. With a
+  `fetch` that clones responses, that cancel never settled and the retry
+  hung.
 - Trailing slashes on `baseUrl` are now removed with a linear scan instead of
   the regex `/\/+$/`, which ran in quadratic time on a base URL made of many
   slashes (CodeQL js/polynomial-redos). Behaviour is unchanged for every

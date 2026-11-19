@@ -35,7 +35,9 @@ function clientReturning(
   const calls: { url: string; init: RequestInit }[] = [];
   const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
     calls.push({ url: String(url), init });
-    return queue.length > 1 ? queue.shift()! : queue[0]!;
+    // A real fetch returns a new Response on every call. The last queued one
+    // is replayed, so hand out an unread clone, since a body reads only once.
+    return queue.length > 1 ? queue.shift()! : queue[0]!.clone();
   });
   const client = new LiveTennisAPI({
     apiKey: 'twjp_test',
@@ -434,6 +436,81 @@ describe('timeout covers the body', () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe('body cut off mid-read', () => {
+  /**
+   * A 200 whose headers arrive and whose body sends half a JSON document and
+   * then fails, long before the deadline. undici reports a dropped
+   * connection this way, as a TypeError("terminated") on the body stream.
+   */
+  const brokenBody = () => {
+    let sent = false;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(new TextEncoder().encode('{"id":'));
+          } else {
+            controller.error(new TypeError('terminated'));
+          }
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+
+  it('throws APIConnectionError, never a silent undefined', async () => {
+    const { client, calls } = clientReturning(brokenBody(), { timeout: 5_000, maxRetries: 0 });
+    const err = await client.getMatch(1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(APIConnectionError);
+    expect(err).not.toBeInstanceOf(APITimeoutError);
+    expect(String((err as Error).message)).toContain('terminated');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('raises APIConnectionError when a real socket drops half way through the body', async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"id":', () => res.socket?.destroy());
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const client = new LiveTennisAPI({
+        apiKey: 'twjp_test',
+        baseUrl: `http://127.0.0.1:${port}`,
+        timeout: 5_000,
+        maxRetries: 0,
+      });
+      const err = await client.getMatch(1).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(err).not.toBeInstanceOf(APITimeoutError);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('still decodes a whole body that is not JSON to undefined, with no retry', async () => {
+    for (const text of ['', '<html>nginx</html>']) {
+      const { client, calls } = clientReturning(new Response(text, { status: 200 }), { maxRetries: 2 });
+      await expect(client.health()).resolves.toBeUndefined();
+      expect(calls).toHaveLength(1);
+    }
+    const { client } = clientReturning(new Response('<html>gone</html>', { status: 404 }), { maxRetries: 2 });
+    await expect(client.getMatch(1)).rejects.toMatchObject({ status: 404, body: undefined });
+  });
+
+  it('retries a body cut off mid-read and succeeds on the next attempt', async () => {
+    const { client, calls } = clientReturning([brokenBody(), json(200, { id: 5 })], {
+      timeout: 5_000,
+      maxRetries: 1,
+    });
+    expect((await client.getMatch(5)).id).toBe(5);
+    expect(calls).toHaveLength(2);
   });
 });
 
