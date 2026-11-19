@@ -111,6 +111,32 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
+/**
+ * Settle with `promise`, or reject as soon as `signal` aborts. The platform
+ * fetch already fails its promise and its body stream on abort. A custom
+ * fetch may ignore the signal, so the client enforces its own deadline here.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 export interface ClientOptions {
   /** Your `twjp_` key. Falls back to `process.env.LIVETENNISAPI_KEY` on Node. */
   apiKey?: string;
@@ -179,7 +205,10 @@ export class LiveTennisAPI {
         'No global fetch available. Use Node 18+, or pass a fetch implementation via { fetch }.',
       );
     }
-    this.fetchImpl = impl;
+    // A browser's fetch must be called on the global object. A stored copy
+    // called as a method of this client throws "Illegal invocation" in
+    // Chrome. The wrapper calls the global fetch the way the page would.
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   // -- transport --------------------------------------------------------------
@@ -233,62 +262,93 @@ export class LiveTennisAPI {
     requiredTier?: Tier,
   ): Promise<T> {
     const url = this.url(path, params);
+    // Called as a plain function, never as a method of this client: a
+    // browser's fetch passed in as `{ fetch: window.fetch }` refuses any
+    // receiver but the global object.
+    const fetchImpl = this.fetchImpl;
 
     for (let attempt = 0; ; attempt += 1) {
+      const retryable = attempt < this.maxRetries;
       let response: Response;
+      let body: unknown;
 
+      // One deadline covers the whole attempt, headers and body. A server
+      // can send its headers and then stall the body, and a timer cleared at
+      // the headers would leave that read with no deadline at all.
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeout);
       try {
-        response = await this.fetchImpl(url, {
-          method: 'GET',
-          headers: this.headers(),
-          signal: controller.signal,
-        });
+        response = await untilAborted(
+          fetchImpl(url, {
+            method: 'GET',
+            headers: this.headers(),
+            signal: controller.signal,
+          }),
+          controller.signal,
+        );
+        if (this.shouldRetry(response.status) && retryable && response.status !== 429) {
+          // Drain the discarded body, or undici holds the connection until GC.
+          // Not awaited: a cloned (teed) body settles its cancel only once
+          // its twin is cancelled too, and the retry must not wait on that.
+          try {
+            void response.body?.cancel().catch(() => undefined);
+          } catch {
+            /* a polyfilled body with no cancel() */
+          }
+        } else {
+          body = await this.decode(response, controller.signal);
+        }
       } catch (err) {
-        const aborted = err instanceof Error && err.name === 'AbortError';
-        if (attempt >= this.maxRetries) {
+        // No response, a body read that failed, or the deadline fired first.
+        const aborted = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
+        if (!retryable) {
           throw aborted
             ? new APITimeoutError(`request to ${url} timed out after ${this.timeout}ms`)
             : new APIConnectionError(`could not reach ${url}: ${String(err)}`);
         }
+        clearTimeout(timer);
         await sleep(this.backoff(attempt));
         continue;
       } finally {
         clearTimeout(timer);
       }
 
-      if (this.shouldRetry(response.status) && attempt < this.maxRetries) {
+      if (this.shouldRetry(response.status) && retryable) {
         if (response.status === 429) {
           // Not every 429 is worth retrying. A daily 429 (`scope: "day"`) does
           // not lift until the daily reset, and `abuse_throttled` is a ~24h
           // block that counts rejected requests — retrying either inside a
           // request is exactly the loop the API is telling you to fix.
-          const body = await this.decode(response);
           const shape = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
           if (shape.error === 'abuse_throttled' || shape.scope === 'day') {
             this.throwFor(response, path, url, body, requiredTier);
-          }
-        } else {
-          // Drain the discarded body, or undici holds the connection until GC.
-          try {
-            await response.body?.cancel();
-          } catch {
-            /* already consumed or unsupported */
           }
         }
         await sleep(this.backoff(attempt, retryAfterSeconds(response.headers)));
         continue;
       }
 
-      if (!response.ok) this.throwFor(response, path, url, await this.decode(response), requiredTier);
-      return (await this.decode(response)) as T;
+      if (!response.ok) this.throwFor(response, path, url, body, requiredTier);
+      return body as T;
     }
   }
 
-  private async decode(response: Response): Promise<unknown> {
+  /**
+   * Read the body under the attempt's deadline, then parse it as JSON.
+   *
+   * Reading and parsing fail in different ways and are kept apart, whatever
+   * fetch the caller passed. A failed read (the deadline, a dropped
+   * connection) throws, so the caller retries or raises `APITimeoutError` /
+   * `APIConnectionError`, never a silent `undefined`. A body that arrived
+   * whole but is not JSON (an HTML error page, an empty reply) gives
+   * `undefined`. That split does not depend on the error class a fetch
+   * uses for bad JSON, which differs between implementations.
+   */
+  private async decode(response: Response, signal: AbortSignal): Promise<unknown> {
+    const text = await untilAborted(response.text(), signal);
+    if (!text) return undefined;
     try {
-      return await response.json();
+      return JSON.parse(text) as unknown;
     } catch {
       return undefined;
     }
@@ -838,11 +898,20 @@ export class LiveTennisAPI {
    * return, model fields included. Mint a fresh token on every reconnect,
    * never reuse one across connections.
    *
+   * Since 2026-10-23 every state leaves the score channels twice — a
+   * `model: 'pending'` frame the instant it is accepted (model keys null) and
+   * a `model: 'ready'` frame once the model run finished. Dedup on
+   * `(match_id, score.sequence, model)`. If you do not use the model fields,
+   * pass `{ model_fields: 'off' }`: `channels.match` / `channels.slate` then
+   * name the score-only channels (`match:{match_id}:score_only` /
+   * `slate:score_only`), one `model: 'off'` frame per state with the model
+   * keys left out, and the response echoes `model_fields: 'off'`.
+   *
    * This is a separate transport from `LiveScoreStream` (the native `/ws`
    * feed): same data, built for high fan-out.
    */
-  getWsToken(): Promise<WsToken> {
-    return this.request('/ws-token');
+  getWsToken(params: { model_fields?: 'on' | 'off' } = {}): Promise<WsToken> {
+    return this.request('/ws-token', params);
   }
 
   // -- pagination -------------------------------------------------------------

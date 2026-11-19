@@ -38,6 +38,20 @@
  * mid-break-point does not receive the onset — so there is no resume
  * machinery for them, by design.
  *
+ * **Score first** (since 2026-10-23): every accepted state leaves the score
+ * channels twice, and every `score` frame carries `model` beside `score`:
+ * `'pending'` the instant the state is accepted (the four model keys present
+ * and null) and `'ready'` once its model run finished (262 ms median, p90
+ * 790 ms later), or once as `'ready'` when the model finished first. Both
+ * frames carry the same `score.sequence`, so dedup on
+ * `(match_id, score.sequence, model)`; apply each frame to the `sequence` it
+ * names and take the model values from the `ready` frame of that sequence —
+ * a `ready` frame can arrive after the `pending` frame of a later sequence.
+ * A frame with no `model` is `ready` (`scoreModelState` applies that rule).
+ * If you do not use the model fields, pass `modelFields: false`: the token is
+ * minted with `?model_fields=off`, the mint names the score-only channels and
+ * each state is one `model: 'off'` frame with the model keys left out.
+ *
  * Score frames are complete-state and best-effort: a missed frame
  * self-corrects on the next one, so there is no catch-up to do. POINT frames
  * are events — a missed frame is a missed point — so with `points: true` the
@@ -230,6 +244,18 @@ export interface PushStreamOptions {
    * resume machinery for them (nothing like `pointsResume`), by design.
    */
   signals?: boolean;
+  /**
+   * `false` asks for score-only frames: the token is minted with
+   * `?model_fields=off`, so the mint's `channels.match` / `channels.slate`
+   * name the score-only channels (`match:{match_id}:score_only` /
+   * `slate:score_only`) and the stream subscribes those. Each state is then
+   * ONE frame, `model: 'off'`, with the four model keys left out — nothing
+   * waits on the model and there is no second frame. Default `true`: the
+   * score channels, every state as `model: 'pending'` then `'ready'`.
+   * Honoured only while the feature is on server-side; the mint echoes the
+   * switch it applied in `model_fields`.
+   */
+  modelFields?: boolean;
   autoReconnect?: boolean;
   /** 0 means retry forever. */
   maxReconnectAttempts?: number;
@@ -251,6 +277,7 @@ export class PushStream {
   readonly points: boolean;
   readonly pointsResume: boolean;
   readonly signals: boolean;
+  readonly modelFields: boolean;
   readonly autoReconnect: boolean;
   readonly maxReconnectAttempts: number;
   readonly timeout: number;
@@ -295,6 +322,7 @@ export class PushStream {
     this.points = options.points ?? false;
     this.pointsResume = this.points && (options.pointsResume ?? true);
     this.signals = options.signals ?? false;
+    this.modelFields = options.modelFields ?? true;
     this.onGap = options.onGap;
     this.autoReconnect = options.autoReconnect ?? true;
     this.maxReconnectAttempts = Math.max(0, options.maxReconnectAttempts ?? 0);
@@ -324,10 +352,12 @@ export class PushStream {
   /**
    * Mint a fresh connection token. Called before EVERY connection attempt —
    * tokens expire with the connection and must never be reused across
-   * reconnects.
+   * reconnects. With `modelFields: false` the mint carries
+   * `?model_fields=off`, so the vocabulary it returns names the score-only
+   * channels and `channelsFor` subscribes those without knowing their names.
    */
   private async mint(): Promise<{ token: string; wsUrl: string; channels: WsToken['channels'] }> {
-    const minted = await this.client.getWsToken();
+    const minted = await this.client.getWsToken(this.modelFields ? {} : { model_fields: 'off' });
     const token = typeof minted.token === 'string' ? minted.token : '';
     const wsUrl = typeof minted.ws_url === 'string' ? minted.ws_url : '';
     if (!token || !wsUrl) {

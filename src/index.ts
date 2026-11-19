@@ -41,7 +41,7 @@ export {
 } from './errors.js';
 export type { Tier } from './errors.js';
 
-export { gamesForSet, formatScore } from './types.js';
+export { gamesForSet, formatScore, scoreModelState } from './types.js';
 export type {
   Analysis,
   ArchiveCareer,
@@ -110,6 +110,7 @@ export type {
   PlayerWithdrawalCount,
   Price,
   Score,
+  ScoreModelState,
   ScoreUpdate,
   StreamFrame,
   WsToken,

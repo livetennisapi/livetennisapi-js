@@ -5,11 +5,65 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.3] - 2026-11-19
+
 ### Fixed
+- **Browsers.** Every request failed in Chrome with `TypeError: Failed to
+  execute 'fetch' on 'Window': Illegal invocation`, before anything went out.
+  The client kept the global `fetch` and called it as its own method, and a
+  browser's `fetch` refuses any `this` but the global object. Node's fetch
+  does not check, so the tests never caught it. With no `fetch` option the
+  client now calls `globalThis.fetch(input, init)` when each request is made.
+  A `fetch` you pass in is called as a plain function, so
+  `{ fetch: window.fetch }` works too. Also affects `PushStream`, which mints
+  its token through the same client.
+- **`timeout` now covers the body.** The timer stopped once the headers
+  arrived, so a reply whose body stalled hung the call forever. The deadline
+  now runs until the body is read. A body cut off by it throws
+  `APITimeoutError` and is retried like any other timeout, never returned as
+  `undefined`. The client enforces the deadline itself, so a custom `fetch`
+  that ignores the abort signal is covered too.
+- **A body cut off mid-read** now raises `APIConnectionError`, and is
+  retried like any other connection error, instead of resolving to
+  `undefined`. This matches the Python client. The body is read as text
+  first and parsed after, so a whole body that is not JSON still gives
+  `undefined`. That no longer depends on the error class a custom `fetch`
+  throws for bad JSON.
+- A retried 5xx no longer waits for its discarded body to cancel. With a
+  `fetch` that clones responses, that cancel never settled and the retry
+  hung.
 - Trailing slashes on `baseUrl` are now removed with a linear scan instead of
   the regex `/\/+$/`, which ran in quadratic time on a base URL made of many
   slashes (CodeQL js/polynomial-redos). Behaviour is unchanged for every
   normal URL. Applies to `LiveTennisAPI`, `LiveScoreStream` and `PushStream`.
+
+## [1.10.2] - 2026-10-23
+
+### Added
+- **Score first.** Every push and WebSocket `score` frame now carries `model`
+  beside `score` (API 2026-10-23): `'pending'` the instant a state is accepted
+  (the four model keys present and null), `'ready'` once its model run
+  finished, or `'off'` on the score-only channels. On the push feed a state
+  leaves twice, pending then ready, with the same `score.sequence`, so dedup
+  on `(match_id, score.sequence, model)` and apply each frame to the
+  `sequence` it names. A frame with no `model` is `ready`. New type
+  `ScoreModelState`, new `model` field on `ScoreUpdate` and `PushFrame`, and
+  `scoreModelState(frame)`, which applies the missing-means-ready rule.
+- **`modelFields: false`** on `PushStream` (mints with `?model_fields=off` and
+  subscribes the score-only channels the mint names) and on
+  `LiveScoreStream` (sends `"model_fields": false` on subscribe). Each state
+  is then one `model: 'off'` frame with the model keys left out.
+- `getWsToken({ model_fields: 'off' })` and the `WsToken.model_fields` echo.
+- `Score` types `sequence`, `accepted_at`, `received_at`,
+  `win_probability_p1_model` and `win_probability_meta`, all of which the
+  score object has carried for a while and the interface did not name.
+
+## [1.10.1] - 2026-10-22
+
+### Fixed
+- `PlayerServeReturn.matches_incomplete` is now typed as `number`. It was
+  present at runtime but missing from the interface, so the index signature
+  made it `unknown`.
 
 ## [1.10.0] - 2026-10-22
 

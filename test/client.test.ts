@@ -1,9 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
-import type { PlayerRecentMatch } from '../src/index.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import type { PlayerRecentMatch, PlayerServeReturn } from '../src/index.js';
 import { stripTrailingSlashes } from '../src/client.js';
 
 import {
+  APIConnectionError,
+  APITimeoutError,
   AbuseThrottled,
   BadRequest,
   LiveTennisAPI,
@@ -30,7 +35,9 @@ function clientReturning(
   const calls: { url: string; init: RequestInit }[] = [];
   const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
     calls.push({ url: String(url), init });
-    return queue.length > 1 ? queue.shift()! : queue[0]!;
+    // A real fetch returns a new Response on every call. The last queued one
+    // is replayed, so hand out an unread clone, since a body reads only once.
+    return queue.length > 1 ? queue.shift()! : queue[0]!.clone();
   });
   const client = new LiveTennisAPI({
     apiKey: 'twjp_test',
@@ -312,6 +319,201 @@ describe('retries', () => {
   });
 });
 
+describe('default fetch', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /**
+   * A stand-in for a browser's fetch. Chrome refuses any receiver other than
+   * the global object or none, with "Illegal invocation". Node's undici does
+   * not check, which is why the suite never saw the browser failure.
+   */
+  function browserFetch(body: unknown = { status: 'ok' }) {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    const impl = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+      }
+      calls.push({ url: String(input), init });
+      return Promise.resolve(json(200, body));
+    };
+    return { impl: impl as typeof fetch, calls };
+  }
+
+  it('calls the global fetch with a receiver a browser accepts', async () => {
+    const { impl, calls } = browserFetch();
+    globalThis.fetch = impl;
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0 });
+    await expect(client.health()).resolves.toEqual({ status: 'ok' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(`${BASE}/health`);
+    expect(calls[0]!.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('calls a fetch passed in options as given, so window.fetch works too', async () => {
+    const { impl, calls } = browserFetch({ id: 9 });
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0, fetch: impl });
+    expect((await client.getMatch(9)).id).toBe(9);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('reads the global fetch when the request is made', async () => {
+    const first = browserFetch({ id: 3 });
+    globalThis.fetch = first.impl;
+    const client = new LiveTennisAPI({ apiKey: 'twjp_test', maxRetries: 0 });
+    const later = browserFetch({ id: 4 });
+    globalThis.fetch = later.impl;
+    expect((await client.getMatch(4)).id).toBe(4);
+    expect(first.calls).toHaveLength(0);
+    expect(later.calls).toHaveLength(1);
+  });
+
+  it('lets PushStream mint its token through a browser fetch', async () => {
+    const { impl, calls } = browserFetch({ token: 'tok', ws_url: 'wss://push.example', channels: {} });
+    globalThis.fetch = impl;
+    const push = new PushStream({ apiKey: 'twjp_test' });
+    // The mint rides the stream's own REST client, built without a fetch option.
+    const client = (push as unknown as { client: LiveTennisAPI }).client;
+    await expect(client.getWsToken()).resolves.toMatchObject({ token: 'tok' });
+    expect(calls[0]!.url).toBe(`${BASE}/ws-token`);
+  });
+
+  it('still refuses to build a client when there is no fetch at all', () => {
+    (globalThis as { fetch?: unknown }).fetch = undefined;
+    expect(() => new LiveTennisAPI({ apiKey: 'twjp_test' })).toThrow(/No global fetch available/);
+  });
+});
+
+describe('timeout covers the body', () => {
+  /** A 200 whose headers arrive at once and whose body stops half way, forever. */
+  const stalledBody = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+
+  it('throws APITimeoutError when the body never finishes', { timeout: 3_000 }, async () => {
+    const { client, calls } = clientReturning(stalledBody(), { timeout: 100, maxRetries: 0 });
+    const started = Date.now();
+    await expect(client.getMatch(1)).rejects.toBeInstanceOf(APITimeoutError);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries a stalled body like any other timeout', { timeout: 5_000 }, async () => {
+    const { client, calls } = clientReturning([stalledBody(), json(200, { id: 2 })], {
+      timeout: 100,
+      maxRetries: 1,
+    });
+    expect((await client.getMatch(2)).id).toBe(2);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('times out a real socket that sends headers and then stalls', { timeout: 5_000 }, async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"id":');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const client = new LiveTennisAPI({
+        apiKey: 'twjp_test',
+        baseUrl: `http://127.0.0.1:${port}`,
+        timeout: 200,
+        maxRetries: 0,
+      });
+      const err = await client.getMatch(1).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(APITimeoutError);
+      expect(err).toBeInstanceOf(APIConnectionError);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe('body cut off mid-read', () => {
+  /**
+   * A 200 whose headers arrive and whose body sends half a JSON document and
+   * then fails, long before the deadline. undici reports a dropped
+   * connection this way, as a TypeError("terminated") on the body stream.
+   */
+  const brokenBody = () => {
+    let sent = false;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(new TextEncoder().encode('{"id":'));
+          } else {
+            controller.error(new TypeError('terminated'));
+          }
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  };
+
+  it('throws APIConnectionError, never a silent undefined', async () => {
+    const { client, calls } = clientReturning(brokenBody(), { timeout: 5_000, maxRetries: 0 });
+    const err = await client.getMatch(1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(APIConnectionError);
+    expect(err).not.toBeInstanceOf(APITimeoutError);
+    expect(String((err as Error).message)).toContain('terminated');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('raises APIConnectionError when a real socket drops half way through the body', async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"id":', () => res.socket?.destroy());
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const client = new LiveTennisAPI({
+        apiKey: 'twjp_test',
+        baseUrl: `http://127.0.0.1:${port}`,
+        timeout: 5_000,
+        maxRetries: 0,
+      });
+      const err = await client.getMatch(1).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(APIConnectionError);
+      expect(err).not.toBeInstanceOf(APITimeoutError);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('still decodes a whole body that is not JSON to undefined, with no retry', async () => {
+    for (const text of ['', '<html>nginx</html>']) {
+      const { client, calls } = clientReturning(new Response(text, { status: 200 }), { maxRetries: 2 });
+      await expect(client.health()).resolves.toBeUndefined();
+      expect(calls).toHaveLength(1);
+    }
+    const { client } = clientReturning(new Response('<html>gone</html>', { status: 404 }), { maxRetries: 2 });
+    await expect(client.getMatch(1)).rejects.toMatchObject({ status: 404, body: undefined });
+  });
+
+  it('retries a body cut off mid-read and succeeds on the next attempt', async () => {
+    const { client, calls } = clientReturning([brokenBody(), json(200, { id: 5 })], {
+      timeout: 5_000,
+      maxRetries: 1,
+    });
+    expect((await client.getMatch(5)).id).toBe(5);
+    expect(calls).toHaveLength(2);
+  });
+});
+
 describe('requests', () => {
   it('omits undefined params', async () => {
     const { client, calls } = clientReturning(json(200, { data: [] }));
@@ -545,7 +747,26 @@ describe('requests', () => {
     );
     const tok = await client.getWsToken();
     expect(calls[0]!.url).toContain(`${BASE}/ws-token`);
+    expect(calls[0]!.url).not.toContain('model_fields');
     expect(tok.channels?.slate).toBe('slate:all');
+    expect(tok.model_fields).toBeUndefined();
+  });
+
+  it('passes model_fields=off to the ws-token mint and reads the echo', async () => {
+    const { client, calls } = clientReturning(
+      json(200, {
+        token: 'x',
+        expires_in: 300,
+        ws_url: 'wss://api.livetennisapi.com/connection/websocket',
+        channels: { match: 'match:{match_id}:score_only', slate: 'slate:score_only' },
+        model_fields: 'off',
+      }),
+    );
+    const tok = await client.getWsToken({ model_fields: 'off' });
+    expect(calls[0]!.url).toContain(`${BASE}/ws-token?model_fields=off`);
+    expect(tok.model_fields).toBe('off');
+    expect(tok.channels?.slate).toBe('slate:score_only');
+    expect(tok.channels?.match).toBe('match:{match_id}:score_only');
   });
 });
 
@@ -807,6 +1028,18 @@ describe('getPlayerStats', () => {
     const { client } = clientReturning(json(200, { records: { recent: [row] } }));
     const stats = await client.getPlayerStats(7);
     expect(stats.records?.recent?.[0]?.opponent).toBeNull();
+  });
+
+  it('types serve_return.matches_incomplete as a number', async () => {
+    // The annotation is the check: without the field on PlayerServeReturn the
+    // Extensible index signature makes it `unknown`, and tsc refuses this line.
+    const sr: PlayerServeReturn = { matches: 3, matches_with_stats: 2, matches_incomplete: 1 };
+    const n: number | undefined = sr.matches_incomplete;
+    expect(n).toBe(1);
+    const { client } = clientReturning(json(200, { serve_return: sr }));
+    const stats = await client.getPlayerStats(7);
+    const kept: number | undefined = stats.serve_return?.matches_incomplete;
+    expect(kept).toBe(1);
   });
 
   it('sends no query string when no filters are given', async () => {
