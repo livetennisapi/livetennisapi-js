@@ -368,6 +368,16 @@ describe('default fetch', () => {
     expect(later.calls).toHaveLength(1);
   });
 
+  it('lets PushStream mint its token through a browser fetch', async () => {
+    const { impl, calls } = browserFetch({ token: 'tok', ws_url: 'wss://push.example', channels: {} });
+    globalThis.fetch = impl;
+    const push = new PushStream({ apiKey: 'twjp_test' });
+    // The mint rides the stream's own REST client, built without a fetch option.
+    const client = (push as unknown as { client: LiveTennisAPI }).client;
+    await expect(client.getWsToken()).resolves.toMatchObject({ token: 'tok' });
+    expect(calls[0]!.url).toBe(`${BASE}/ws-token`);
+  });
+
   it('still refuses to build a client when there is no fetch at all', () => {
     (globalThis as { fetch?: unknown }).fetch = undefined;
     expect(() => new LiveTennisAPI({ apiKey: 'twjp_test' })).toThrow(/No global fetch available/);
