@@ -382,16 +382,18 @@ try {
 | `RateLimited` | 429 — has `.retryAfter` (seconds); a **daily** 429 also has `.resetsAt`, the absolute ISO instant the allowance returns |
 | `AbuseThrottled` | 429 `abuse_throttled` — a ~24h block for chronic over-cap use; has `.retryAtEpoch`. Fix the retry loop |
 | `ServerError` / `ServiceUnavailable` | 5xx |
-| `APIConnectionError` / `APITimeoutError` | never reached the API, or the reply did not finish within `timeout` |
+| `APIConnectionError` / `APITimeoutError` | never reached the API, or the reply broke off or did not finish within `timeout` |
 
 All extend `LiveTennisAPIError` (`AbuseThrottled` extends `RateLimited`, so an
 existing `catch` keeps working).
 
-Requests retry on **per-minute 429 and 5xx only**, honouring `Retry-After` with
-exponential backoff and jitter. Other 4xx are never retried — a bad key or an
-unentitled tier cannot start working, and retrying only burns rate limit. Nor
-are the two 429s retrying cannot fix: a daily 429 (nothing lifts before
-`.resetsAt`) and `abuse_throttled` (the block that counting retries earned).
+Requests retry on **per-minute 429, 5xx, connection errors and timeouts**, up
+to `maxRetries` times. A 429 or 5xx waits for its `Retry-After` when it has one.
+Otherwise the wait grows exponentially, with jitter. Other 4xx are never
+retried. A bad key or an unentitled tier cannot start working, and retrying
+only burns rate limit. Nor are the two 429s retrying cannot fix: a daily 429
+(nothing lifts before `.resetsAt`) and `abuse_throttled` (the block that
+counting retries earned).
 
 ## The results archive (1968–2022) and head-to-head
 
@@ -593,6 +595,7 @@ Everything in the Live Tennis API developer surface:
 | Break-point starter — Python | — | [repo](https://github.com/livetennisapi/livetennisapi-starter-python) | — |
 | Break-point starter — Node | — | [repo](https://github.com/livetennisapi/livetennisapi-starter-node) | — |
 | Break-point starter — Go | — | [repo](https://github.com/livetennisapi/livetennisapi-starter-go) | — |
+| Live scores web page starter | — | [repo](https://github.com/livetennisapi/livetennisapi-starter-web) | — |
 
 - **API reference** — <https://docs.livetennisapi.com> ([plain-HTML version](https://docs.livetennisapi.com/reference.html), no JavaScript required)
 - **OpenAPI 3.1 specification** — [livetennisapi/openapi](https://github.com/livetennisapi/openapi)
