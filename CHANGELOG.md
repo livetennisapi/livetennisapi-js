@@ -5,6 +5,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.3] - 2026-11-19
+
 ### Fixed
 - **Browsers.** Every request failed in Chrome with `TypeError: Failed to
   execute 'fetch' on 'Window': Illegal invocation`, before anything went out.
